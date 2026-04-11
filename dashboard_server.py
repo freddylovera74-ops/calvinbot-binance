@@ -33,7 +33,7 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR    = Path(__file__).parent
 REDIS_URL   = os.getenv("REDIS_URL", "redis://localhost:6379")
-PORT        = int(os.getenv("DASHBOARD_PORT", "8081"))
+PORT        = int(os.getenv("DASHBOARD_PORT", "8084"))
 HISTORY_LEN = 120   # ~2 min a 1s/ciclo
 
 logging.basicConfig(
