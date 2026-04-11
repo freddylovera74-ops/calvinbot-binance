@@ -658,7 +658,7 @@ def _log_trade_csv(
             if not file_exists:
                 writer.writerow([
                     "timestamp", "event", "position_id", "symbol", "side",
-                    "entry_price", "exit_price", "qty_btc", "size_usd", "pnl_usd", "reason",
+                    "entry_price", "exit_price", "qty_btc", "size_usd", "pnl_usd", "reason", "mode",
                 ])
             writer.writerow([
                 datetime.now(timezone.utc).isoformat(),
@@ -672,6 +672,7 @@ def _log_trade_csv(
                 f"{pos.size_usd:.2f}",
                 f"{pnl:.2f}",
                 reason,
+                "DRY" if DRY_RUN else "REAL",
             ])
     except Exception as exc:
         _lwarn(f"[CSV] Error escribiendo trade: {exc}")
@@ -687,18 +688,60 @@ async def _heartbeat_loop() -> None:
     while True:
         try:
             if _redis:
-                btc = bp.get_btc_price()
+                btc   = bp.get_btc_price()
+                mom_pct, mom_dir = bp.get_momentum(window_s=BTC_WINDOW_S)
+
+                # Detalles de posiciones abiertas para el dashboard
+                positions_data = []
+                now_ts = time.time()
+                for p in _open_pos:
+                    unrealized_pct = ((btc - p.entry_price) / p.entry_price * 100) if btc else 0
+                    positions_data.append({
+                        "position_id":   p.position_id[:12],
+                        "symbol":        p.symbol,
+                        "entry_price":   round(p.entry_price, 2),
+                        "current_price": round(btc, 2) if btc else None,
+                        "qty_base":      round(p.qty_base, 6),
+                        "size_usd":      round(p.size_usd, 2),
+                        "tp_price":      round(p.tp_price, 2),
+                        "sl_price":      round(p.sl_price, 2),
+                        "unrealized_pct": round(unrealized_pct, 3),
+                        "holding_s":     round(now_ts - p.opened_at),
+                        "stop_order_id": p.stop_order_id[:12] if p.stop_order_id else "",
+                    })
+
                 hb = {
-                    "bot":           "strategy_binance",
-                    "status":        "online",
-                    "dry_run":       DRY_RUN,
+                    "bot":            "strategy_binance",
+                    "status":         "online",
+                    "dry_run":        DRY_RUN,
+                    "symbol":         SYMBOL,
                     "open_positions": len(_open_pos),
-                    "session_pnl":   round(_session_pnl, 2),
-                    "btc_price":     round(btc, 2) if btc else None,
+                    "positions_data": positions_data,
+                    "session_pnl":    round(_session_pnl, 2),
+                    "btc_price":      round(btc, 2) if btc else None,
+                    "btc_momentum":   round(mom_pct, 4),
+                    "btc_direction":  mom_dir,
                     "entries_paused": _entries_paused,
-                    "timestamp":     datetime.now(timezone.utc).isoformat(),
+                    "params": {
+                        "STAKE_USD":     STAKE_USD,
+                        "TP_PCT":        TP_PCT,
+                        "SL_DROP_PCT":   SL_DROP_PCT,
+                        "BTC_WINDOW_S":  BTC_WINDOW_S,
+                        "BTC_MIN_PCT":   BTC_MIN_PCT,
+                        "MAX_HOLD_S":    MAX_HOLD_S,
+                        "THROTTLE_S":    THROTTLE_S,
+                        "MAX_OPEN_POS":  MAX_OPEN_POS,
+                        "DAILY_LOSS_LIMIT": DAILY_LOSS_LIMIT,
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
-                await _redis.publish(REDIS_CH_HEARTBEATS, json.dumps(hb))
+
+                payload = json.dumps(hb, ensure_ascii=False)
+                # Pub/sub para listeners en tiempo real
+                await _redis.publish(REDIS_CH_HEARTBEATS, payload)
+                # Key persistente para el dashboard (TTL 30s)
+                await _redis.setex("state:strategy:latest", 30, payload)
+
         except Exception:
             pass
         await asyncio.sleep(5)
