@@ -1,0 +1,59 @@
+# ── Secretos — NUNCA subir al repo ───────────────────────────────────────────
+.env
+.env.*
+*.key
+*.pem
+
+# ── Entorno virtual ───────────────────────────────────────────────────────────
+.venv/
+venv/
+venv_calvin/
+env/
+
+# ── Claude Code (configuración local del IDE) ─────────────────────────────────
+.claude/
+
+# ── Base de datos Optuna (se regenera sola) ───────────────────────────────────
+*.db
+optuna_calvin.db
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+*.log.*
+
+# ── Estado persistido del bot (datos de runtime, no código) ──────────────────
+calvin5_trades.csv
+binance_trades.csv
+calvin5_open.json
+binance_open.json
+calvin5_window.json
+calvin5_loss_limits.json
+dynamic_bounds.json
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# ── Paquetes grandes innecesarios en el repo ──────────────────────────────────
+anthropic-ai-claude-code-*.tgz
+*.tgz
+*.tar.gz
+
+# ── Reportes generados ────────────────────────────────────────────────────────
+AUDIT_REPORT.md
+CRITICAL_ISSUES_REPORT.md
+DASHBOARD_FIX.md
+HEARTBEAT_SOLUTION.md

@@ -1,0 +1,17 @@
+[Unit]
+Description=CalvinBot — Dashboard (puerto 8081)
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/calvinbot-binance
+EnvironmentFile=/opt/calvinbot-binance/.env
+ExecStart=/opt/calvinbot-binance/.venv/bin/python dashboard_server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

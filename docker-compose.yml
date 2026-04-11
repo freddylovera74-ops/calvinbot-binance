@@ -1,0 +1,148 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CalvinBot — Docker Compose
+#
+#  Servicios:
+#    redis      — Broker de mensajes (pub/sub + streams)
+#    calvin5    — Calculador de señales (brain)
+#    executor   — Ejecución de órdenes en Polymarket CLOB
+#    watchdog   — Supervisor independiente
+#    optimizer  — Optimización Bayesiana (Optuna)
+#    dashboard  — Dashboard web en tiempo real (puerto 8081)
+#
+#  Uso:
+#    docker compose up -d              # arrancar todos
+#    docker compose up -d redis        # solo Redis (para desarrollo local)
+#    docker compose logs -f calvin5    # ver logs en tiempo real
+#    docker compose down               # parar todo
+#    docker compose down -v            # parar + borrar volúmenes
+#
+#  Variables de entorno:
+#    Crear un fichero .env en este directorio con:
+#      PRIVATE_KEY=...
+#      POLYMARKET_ADDRESS=...
+#      CLOB_API_KEY=...
+#      CLOB_SECRET=...
+#      CLOB_PASSPHRASE=...
+#      TG_TOKEN=...
+#      TG_CHAT_ID=...
+#      POLYGON_RPC=...
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: calvinbot_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Calvin5 (calculador) ───────────────────────────────────────────────────
+  calvin5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: calvinbot_calvin5
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PROMETHEUS_PORT=9090
+    volumes:
+      - ./data:/app/data          # CSV, JSON de estado
+      - ./logs:/app/logs
+    ports:
+      - "9090:9090"               # Prometheus metrics
+    command: python calvin5.py
+
+  # ── ExecutionBot ───────────────────────────────────────────────────────────
+  executor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: calvinbot_executor
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python execution_bot.py
+
+  # ── Watchdog ───────────────────────────────────────────────────────────────
+  watchdog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: calvinbot_watchdog
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python watchdog.py
+
+  # ── Dynamic Optimizer ──────────────────────────────────────────────────────
+  optimizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: calvinbot_optimizer
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python dynamic_optimizer.py
+
+  # ── Dashboard ──────────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: calvinbot_dashboard
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8081:8081"
+    command: python dashboard_server.py
+
+volumes:
+  redis_data:
+    driver: local

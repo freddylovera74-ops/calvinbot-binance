@@ -1,0 +1,18 @@
+[Unit]
+Description=CalvinBot — Strategy Bot (Binance Momentum)
+After=network.target redis.service calvinbot-executor.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/calvinbot-binance
+EnvironmentFile=/opt/calvinbot-binance/.env
+ExecStart=/opt/calvinbot-binance/.venv/bin/python strategy_binance.py --real
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

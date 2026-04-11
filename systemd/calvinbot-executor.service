@@ -1,0 +1,18 @@
+[Unit]
+Description=CalvinBot — Execution Bot (Binance)
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/calvinbot-binance
+EnvironmentFile=/opt/calvinbot-binance/.env
+ExecStart=/opt/calvinbot-binance/.venv/bin/python execution_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
