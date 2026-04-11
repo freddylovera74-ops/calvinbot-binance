@@ -1,20 +1,29 @@
-py-clob-client>=0.18.0
+# CalvinBot Binance — dependencias
+# Instalar: pip install -r requirements.txt
+
+# Core async & HTTP
+aiohttp>=3.9.0
+aiofiles>=23.0.0
 websockets>=12.0
-web3>=6.20.0
-httpx>=0.27.0
+requests>=2.31.0
+
+# Redis
+redis>=5.0.0
+
+# Data
 pandas>=2.0.0
 numpy>=1.26.0
+
+# Config
 python-dotenv>=1.0.0
-requests>=2.31.0
-aiohttp>=3.9.0
 pytz>=2024.1
-redis>=5.0.0
-optuna>=3.6.0
+
+# System
 psutil>=5.9.0
-# — Bloque 3: async I/O y HTTP pooling
-aiofiles>=23.0.0
-# — Bloque 4: observabilidad
+
+# Observability (opcional — no-op si no están instalados)
 prometheus-client>=0.19.0
 structlog>=24.0.0
-# — Bloque 4: testing
+
+# Testing
 pytest>=8.0.0

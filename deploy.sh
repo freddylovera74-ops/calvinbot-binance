@@ -18,11 +18,11 @@ git stash --quiet 2>/dev/null || true
 git pull origin main >> "$LOG" 2>&1
 
 # Reiniciar servicios si algo cambió
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reiniciando servicios..." >> "$LOG"
-systemctl restart calvinbot-executor   2>/dev/null || true
-systemctl restart calvinbot-strategy   2>/dev/null || true
-systemctl restart calvinbot-optimizer  2>/dev/null || true
-systemctl restart calvinbot-watchdog   2>/dev/null || true
-systemctl restart calvinbot-dashboard  2>/dev/null || true
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reiniciando servicios CalvinBTC..." >> "$LOG"
+systemctl restart calvinbtc-executor   2>/dev/null || true
+systemctl restart calvinbtc-signal     2>/dev/null || true
+systemctl restart calvinbtc-optimizer  2>/dev/null || true
+systemctl restart calvinbtc-watchdog   2>/dev/null || true
+systemctl restart calvinbtc-dashboard  2>/dev/null || true
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] deploy.sh completado" >> "$LOG"

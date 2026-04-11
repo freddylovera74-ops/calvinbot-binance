@@ -1,6 +1,6 @@
 [Unit]
-Description=CalvinBot — Dynamic Optimizer Binance
-After=network.target redis.service calvinbot-strategy.service
+Description=CalvinBTC · Signal Engine — BTC Momentum Strategy (Binance Spot)
+After=network.target redis.service calvinbtc-executor.service
 Wants=redis.service
 
 [Service]
@@ -8,9 +8,9 @@ Type=simple
 User=root
 WorkingDirectory=/opt/calvinbot-binance
 EnvironmentFile=/opt/calvinbot-binance/.env
-ExecStart=/opt/calvinbot-binance/.venv/bin/python dynamic_optimizer_binance.py
+ExecStart=/opt/calvinbot-binance/.venv/bin/python strategy_binance.py --real
 Restart=always
-RestartSec=30
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 

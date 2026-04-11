@@ -30,6 +30,12 @@ try:
 except ImportError:
     print("ERROR: pip install redis"); sys.exit(1)
 
+try:
+    import loss_tracker as _loss_tracker
+    _HAS_LOSS_TRACKER = True
+except ImportError:
+    _HAS_LOSS_TRACKER = False
+
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR    = Path(__file__).parent
 REDIS_URL   = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -157,6 +163,7 @@ async def collect_state() -> dict:
     redis_ok = False
     strategy = {}
     executor = {}
+    watchdog = {}
 
     try:
         r = await _get_redis()
@@ -165,10 +172,13 @@ async def collect_state() -> dict:
             redis_ok = True
             raw_s = await r.get("state:strategy:latest")
             raw_e = await r.get("state:executor:latest")
+            raw_w = await r.get("state:watchdog:latest")
             if raw_s:
                 strategy = json.loads(raw_s)
             if raw_e:
                 executor = json.loads(raw_e)
+            if raw_w:
+                watchdog = json.loads(raw_w)
     except Exception as ex:
         log.debug(f"Redis error: {ex}")
         await _reset_redis()
@@ -209,6 +219,8 @@ async def collect_state() -> dict:
 
     strategy_alive = _alive(strategy)
     executor_alive = _alive(executor)
+    watchdog_alive = _alive(watchdog)
+    optimizer_alive = watchdog.get("optimizer_ok", False) if watchdog else False
 
     open_positions = strategy.get("positions_data", [])
     params         = strategy.get("params", {})
@@ -246,14 +258,16 @@ async def collect_state() -> dict:
                 k: v for k, v in strategy.items()
                 if k not in ("positions_data", "params", "btc_history")
             }},
-            "executor": {"alive": executor_alive, "data": {
-                **executor,
-                "balance_usdt": executor.get("balance_usdt", ""),
-            }},
+            "executor":  {"alive": executor_alive,  "data": {**executor, "balance_usdt": executor.get("balance_usdt", "")}},
+            "watchdog":  {"alive": watchdog_alive,  "data": watchdog},
+            "optimizer": {"alive": optimizer_alive, "data": {}},
         },
 
         # Params
         "params": params,
+
+        # Loss tracker semanal/mensual
+        "loss_limits": _get_loss_limits(),
 
         # Logs
         "logs": list(_log_buf),
@@ -263,6 +277,29 @@ async def collect_state() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 #  SUBSCRIPTOR DE LOGS EN REDIS
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _get_loss_limits() -> dict:
+    """Devuelve resumen de loss_tracker. No-op si el módulo no está disponible."""
+    if not _HAS_LOSS_TRACKER:
+        return {}
+    try:
+        summary = _loss_tracker.get_summary()
+        status, msg = _loss_tracker.check()
+        return {
+            "week_key":          summary.get("week_key", ""),
+            "month_key":         summary.get("month_key", ""),
+            "weekly_pnl":        summary.get("weekly_pnl", 0.0),
+            "monthly_pnl":       summary.get("monthly_pnl", 0.0),
+            "weekly_limit":      summary.get("weekly_limit", 150.0),
+            "monthly_limit":     summary.get("monthly_limit", 400.0),
+            "weekly_pct":        round(summary.get("weekly_pct_used", 0.0), 1),
+            "monthly_pct":       round(summary.get("monthly_pct_used", 0.0), 1),
+            "status":            status,
+            "msg":               msg,
+        }
+    except Exception:
+        return {}
+
 
 async def log_subscriber():
     """Suscribe a logs:unified y health:heartbeats para el live log stream."""
@@ -358,7 +395,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CalvinBot · Binance Dashboard</title>
+<title>CalvinBTC · Trading Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>
   :root {
@@ -476,7 +513,7 @@ _HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>CalvinBot · Binance</h1>
+  <h1>CalvinBTC · Trading System</h1>
   <span id="mode-badge" class="badge badge-dry">DRY RUN</span>
   <span id="pause-badge" class="badge badge-paused" style="display:none">ENTRIES PAUSED</span>
   <span id="redis-badge" class="badge" style="background:#1a1a2a;color:var(--purple);border:1px solid var(--purple)">Redis ●</span>
@@ -516,13 +553,25 @@ _HTML = r"""<!DOCTYPE html>
       <div class="kpi-value neu" id="kpi-balance">—</div>
       <div class="kpi-sub" id="kpi-stake">stake: —</div>
     </div>
+    <div class="kpi">
+      <div class="kpi-label">Límite Semanal</div>
+      <div class="kpi-value neu" id="kpi-weekly">—</div>
+      <div class="kpi-sub" id="kpi-weekly-sub">— / —</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Límite Mensual</div>
+      <div class="kpi-value neu" id="kpi-monthly">—</div>
+      <div class="kpi-sub" id="kpi-monthly-sub">— / —</div>
+    </div>
   </div>
 
   <!-- Bot status -->
   <div class="bots-row" id="bots-row">
     <div class="bot-pill"><span class="dot dot-off" id="dot-redis"></span> Redis</div>
-    <div class="bot-pill"><span class="dot dot-off" id="dot-strategy"></span> Strategy</div>
-    <div class="bot-pill"><span class="dot dot-off" id="dot-executor"></span> Executor</div>
+    <div class="bot-pill"><span class="dot dot-off" id="dot-strategy"></span> Signal Engine</div>
+    <div class="bot-pill"><span class="dot dot-off" id="dot-executor"></span> Trade Executor</div>
+    <div class="bot-pill"><span class="dot dot-off" id="dot-optimizer"></span> Param Optimizer</div>
+    <div class="bot-pill"><span class="dot dot-off" id="dot-watchdog"></span> Watchdog</div>
   </div>
 
   <!-- Charts -->
@@ -651,9 +700,11 @@ function applyState(s) {
   rBadge.textContent = s.redis_ok ? 'Redis ●' : 'Redis ✕';
 
   // Dots
-  $('dot-redis').className    = 'dot ' + (s.redis_ok ? 'dot-on' : 'dot-off');
-  $('dot-strategy').className = 'dot ' + (s.bots?.strategy?.alive ? 'dot-on' : 'dot-off');
-  $('dot-executor').className = 'dot ' + (s.bots?.executor?.alive ? 'dot-on' : 'dot-off');
+  $('dot-redis').className     = 'dot ' + (s.redis_ok ? 'dot-on' : 'dot-off');
+  $('dot-strategy').className  = 'dot ' + (s.bots?.strategy?.alive  ? 'dot-on' : 'dot-off');
+  $('dot-executor').className  = 'dot ' + (s.bots?.executor?.alive  ? 'dot-on' : 'dot-off');
+  $('dot-optimizer').className = 'dot ' + (s.bots?.optimizer?.alive ? 'dot-on' : 'dot-off');
+  $('dot-watchdog').className  = 'dot ' + (s.bots?.watchdog?.alive  ? 'dot-on' : 'dot-off');
 
   // KPIs
   const btc = s.btc_price;
@@ -753,6 +804,23 @@ function applyState(s) {
         <td style="color:${t.mode === 'LIVE' ? 'var(--green)' : 'var(--yellow)'};font-size:10px">${t.mode}</td>
       </tr>`;
     }).join('');
+  }
+
+  // Loss limits (weekly / monthly)
+  const ll = s.loss_limits || {};
+  if (ll.weekly_pnl !== undefined) {
+    const wPnl = ll.weekly_pnl ?? 0;
+    const mPnl = ll.monthly_pnl ?? 0;
+    const wPct = ll.weekly_pct ?? 0;
+    const mPct = ll.monthly_pct ?? 0;
+    const wStatus = ll.status === 'breached' ? 'neg' : wPct >= 75 ? 'neg' : wPct >= 50 ? 'kpi-value' : 'pos';
+    const mStatus = ll.status === 'breached' ? 'neg' : mPct >= 75 ? 'neg' : mPct >= 50 ? 'kpi-value' : 'pos';
+    $('kpi-weekly').className   = 'kpi-value ' + wStatus;
+    $('kpi-weekly').textContent = fmtP(wPnl) + ' USDT';
+    $('kpi-weekly-sub').textContent = wPct.toFixed(0) + '% de $' + fmt(ll.weekly_limit ?? 150, 0);
+    $('kpi-monthly').className   = 'kpi-value ' + mStatus;
+    $('kpi-monthly').textContent = fmtP(mPnl) + ' USDT';
+    $('kpi-monthly-sub').textContent = mPct.toFixed(0) + '% de $' + fmt(ll.monthly_limit ?? 400, 0);
   }
 
   // Params panel

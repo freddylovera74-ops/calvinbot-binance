@@ -1,14 +1,13 @@
 [Unit]
-Description=CalvinBot — Strategy Bot (Binance Momentum)
-After=network.target redis.service calvinbot-executor.service
-Wants=redis.service
+Description=CalvinBTC · Dashboard — Real-time Web Monitor (port 8084)
+After=network.target redis.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/calvinbot-binance
 EnvironmentFile=/opt/calvinbot-binance/.env
-ExecStart=/opt/calvinbot-binance/.venv/bin/python strategy_binance.py --real
+ExecStart=/opt/calvinbot-binance/.venv/bin/python dashboard_server.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

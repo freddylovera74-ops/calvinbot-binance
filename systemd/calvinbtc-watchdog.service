@@ -1,6 +1,6 @@
 [Unit]
-Description=CalvinBot — Watchdog Binance
-After=network.target redis.service calvinbot-strategy.service calvinbot-executor.service
+Description=CalvinBTC · Watchdog — System Supervisor & Auto-Restart (Binance)
+After=network.target redis.service calvinbtc-signal.service calvinbtc-executor.service
 Wants=redis.service
 
 [Service]

@@ -45,14 +45,16 @@ MAX_RESTARTS_PER_H = int(os.getenv("WD_MAX_RESTARTS_H",    "3"))
 DRAWDOWN_WARN      = float(os.getenv("WD_DRAWDOWN_WARN",   "40.0"))
 DRAWDOWN_KILL      = float(os.getenv("WD_DRAWDOWN_KILL",   "80.0"))
 
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+_wd_log_handler = _RotatingFileHandler(
+    BASE_DIR / "watchdog_binance.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+_wd_log_handler.setFormatter(logging.Formatter("%(asctime)s [WD] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [WD] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(BASE_DIR / "watchdog_binance.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=[_wd_log_handler, logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("watchdog")
 
@@ -187,15 +189,15 @@ async def check_cycle(r: aioredis.Redis, strategy_st: BotState, executor_st: Bot
 
     # ── 3. Alertas de bots offline ──────────────────────────────────────────
     for st, off_s, name in [
-        (strategy_st, strat_off, "calvinbot-strategy"),
-        (executor_st, exec_off,  "calvinbot-executor"),
+        (strategy_st, strat_off, "calvinbtc-signal"),
+        (executor_st, exec_off,  "calvinbtc-executor"),
     ]:
         if off_s > WARN_OFFLINE_S and not st.warned_offline:
             st.warned_offline = True
             log.warning(f"{name} offline desde hace {off_s:.0f}s")
             await send_telegram_async(
                 f"{name} lleva {off_s:.0f}s offline",
-                level="WARNING", prefix_label="Watchdog"
+                level="WARNING", prefix_label="CalvinBTC · Watchdog"
             )
 
         if off_s > RESTART_OFFLINE_S and not st.warned_critical:
@@ -211,17 +213,17 @@ async def check_cycle(r: aioredis.Redis, strategy_st: BotState, executor_st: Bot
             await send_telegram_async(
                 msg,
                 level="CRITICAL" if not restarted else "WARNING",
-                prefix_label="Watchdog"
+                prefix_label="CalvinBTC · Watchdog"
             )
 
     # ── 4. Ambos offline simultáneamente ───────────────────────────────────
     if strat_off > 30 and exec_off > 30 and in_trading_hours():
         log.error("AMBOS bots offline — reinicio de emergencia")
-        _restart_services("calvinbot-strategy", "calvinbot-executor")
+        _restart_services("calvinbtc-signal", "calvinbtc-executor")
         await send_telegram_async(
             f"AMBOS BOTS OFFLINE\nReinicio de emergencia ejecutado\n"
             f"Strategy: {strat_off:.0f}s | Executor: {exec_off:.0f}s",
-            level="CRITICAL", prefix_label="Watchdog"
+            level="CRITICAL", prefix_label="CalvinBTC · Watchdog"
         )
 
     # ── 5. Límites de pérdida ───────────────────────────────────────────────
@@ -238,7 +240,7 @@ async def check_cycle(r: aioredis.Redis, strategy_st: BotState, executor_st: Bot
             await send_telegram_async(
                 f"LIMITE DE PERDIDA SUPERADO\n{lt_msg}\n"
                 f"Session PnL: ${session_pnl:.2f}",
-                level="CRITICAL", prefix_label="Watchdog"
+                level="CRITICAL", prefix_label="CalvinBTC · Watchdog"
             )
 
         elif lt_status == loss_tracker.STATUS_WARNING:
@@ -250,7 +252,7 @@ async def check_cycle(r: aioredis.Redis, strategy_st: BotState, executor_st: Bot
             await send_telegram_async(
                 f"DRAWDOWN KILL activado\nPerdida sesion: ${session_pnl:.2f}\n"
                 f"Limite: ${DRAWDOWN_KILL}",
-                level="CRITICAL", prefix_label="Watchdog"
+                level="CRITICAL", prefix_label="CalvinBTC · Watchdog"
             )
         elif drawdown >= DRAWDOWN_WARN:
             log.warning(f"Drawdown WARNING — ${session_pnl:.2f}")
@@ -278,7 +280,7 @@ async def check_cycle(r: aioredis.Redis, strategy_st: BotState, executor_st: Bot
 
 async def main():
     log.info("=" * 55)
-    log.info("  Watchdog Binance — iniciando")
+    log.info("  CalvinBTC · Watchdog — iniciando")
     log.info(f"  Check: {CHECK_INTERVAL_S}s | Restart threshold: {RESTART_OFFLINE_S}s")
     log.info(f"  Max reinicios/h: {MAX_RESTARTS_PER_H} | Drawdown kill: ${DRAWDOWN_KILL}")
     log.info("=" * 55)
@@ -292,10 +294,10 @@ async def main():
         sys.exit(1)
 
     await send_telegram_async(
-        "Watchdog Binance iniciado\n"
-        f"Supervisando strategy + executor\n"
+        "CalvinBTC · Watchdog iniciado\n"
+        f"Supervisando: Signal Engine + Trade Executor\n"
         f"Restart threshold: {RESTART_OFFLINE_S}s | Max restarts/h: {MAX_RESTARTS_PER_H}",
-        level="INFO", prefix_label="Watchdog"
+        level="INFO", prefix_label="CalvinBTC · Watchdog"
     )
 
     strategy_st = BotState("strategy_binance")

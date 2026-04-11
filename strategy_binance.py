@@ -152,10 +152,13 @@ _pending_receipts: Dict[str, asyncio.Future] = {}
 # ─────────────────────────────────────────────────────────────────────────────
 
 import logging as _logging
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 
 _log = _logging.getLogger("strategy_binance")
 _log.setLevel(_logging.DEBUG)
-_fh  = _logging.FileHandler("strategy_binance.log", encoding="utf-8")
+_fh  = _RotatingFileHandler(
+    "strategy_binance.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
 _fh.setFormatter(_logging.Formatter("%(asctime)s %(levelname)s %(message)s",
                                     datefmt="%Y-%m-%d %H:%M:%S"))
 _log.addHandler(_fh)
@@ -612,7 +615,7 @@ async def _close_position_local(
             f"Entry={pos.entry_price:.2f} Exit={exit_price:.2f} "
             f"PnL={pnl_pct:+.3%}",
             level="WARNING",
-            prefix_label="BinanceBot",
+            prefix_label="CalvinBTC · Signal",
         )
 
 
@@ -899,7 +902,7 @@ async def main() -> None:
 
     _linfo("=" * 60)
     mode_label = "DRY RUN (paper trading)" if DRY_RUN else "REAL MONEY"
-    _linfo(f"  CalvinBot — Binance Spot Testnet Strategy [{mode_label}]")
+    _linfo(f"  CalvinBTC · Signal Engine — Binance Spot [{mode_label}]")
     _linfo(f"  Símbolo: {SYMBOL}  |  Stake: ${STAKE_USD:.2f}  |  Max pos: {MAX_OPEN_POS}")
     _linfo("=" * 60)
 
@@ -919,13 +922,13 @@ async def main() -> None:
     mode_label = "DRY RUN" if DRY_RUN else "REAL TESTNET"
     open_count = len(_open_pos)
     msg = (
-        f"CalvinBot Binance arrancó\n"
+        f"CalvinBTC · Signal Engine arrancó\n"
         f"Modo: {mode_label}\n"
         f"Symbol: {SYMBOL} | Stake: ${STAKE_USD}\n"
         f"TP: {TP_PCT*100:.1f}% | SL: {SL_DROP_PCT*100:.1f}%\n"
         f"Posiciones abiertas cargadas: {open_count}"
     )
-    await send_telegram_async(msg, level="INFO", prefix_label="BinanceBot")
+    await send_telegram_async(msg, level="INFO", prefix_label="CalvinBTC · Signal")
 
     # Iniciar tareas paralelas
     await asyncio.gather(

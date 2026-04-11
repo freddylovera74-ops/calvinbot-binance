@@ -1,259 +1,153 @@
-# CalvinBot — Sistema de Trading Automático para Binance
+# CalvinBTC — Sistema de Trading Automático BTC Spot
 
-> **Mercados:** BTC Up/Down 5 minutos en Polymarket
+> **Exchange:** Binance Spot (Testnet / Real)
+> **Par:** BTCUSDT
 > **Estrategia:** BTC Momentum Sniper
-> **Modo:** Paper trading por defecto (DRY RUN). Real money con `--real`.
+> **Modo:** Paper trading por defecto (`DRY_RUN=true`). Real con `DRY_RUN=false`.
 
 ---
 
 ## ¿Qué hace este sistema?
 
-CalvinBot es un sistema de trading automatizado que apuesta en mercados de predicción de **Polymarket**. Concretamente opera en los mercados del tipo:
+CalvinBot Binance es un sistema de trading algorítmico que opera **BTCUSDT en Binance Spot** usando momentum de precio. Detecta movimientos fuertes de BTC en ventanas cortas y abre posiciones largas con Take Profit y Stop Loss gestionados mediante órdenes nativas de Binance.
 
-> *"¿Estará Bitcoin por encima de X precio dentro de 5 minutos?"*
-
-Cada ronda dura exactamente 5 minutos. Al final:
-- El token **UP** vale 1 USDC si BTC subió → resuelve en 1.00
-- El token **DOWN** vale 1 USDC si BTC bajó → resuelve en 1.00
-- El perdedor vale 0 USDC
-
-El bot **no predice el futuro**. Lo que hace es aprovechar el **momentum de BTC**: si BTC está subiendo con fuerza en los últimos segundos de la ronda, compra tokens UP baratos (ej. 0.70¢) esperando que sigan subiendo hacia 1.00¢ o que el mercado resuelva a su favor.
+El sistema está compuesto por **4 bots independientes** que se supervisan entre sí y se auto-regulan con el tiempo.
 
 ---
 
-## Arquitectura — Los 5 componentes
+## Arquitectura — Los 4 componentes
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           CALVINBOT SYSTEM                              │
-│                                                                         │
-│  ┌─────────────┐    Redis     ┌──────────────┐    Polymarket CLOB       │
-│  │  calvin5.py │ ──signals──► │execution_bot │ ──────────────────────►  │
-│  │  🧠 Cerebro │ ◄──fills──── │ 💪 Músculo   │                          │
-│  └──────┬──────┘              └──────────────┘                          │
-│         │                                                               │
-│  ┌──────▼──────┐              ┌──────────────┐                          │
-│  │  btc_price  │              │  watchdog.py │                          │
-│  │  📡 BTC feed│              │  🐕 Vigilante│                          │
-│  └─────────────┘              └──────────────┘                          │
-│                                                                         │
-│  ┌─────────────────────┐      ┌──────────────────────┐                  │
-│  │  dynamic_optimizer  │      │   dashboard_server   │                  │
-│  │  🔬 Científico       │      │   📊 Vista en web    │                  │
-│  └─────────────────────┘      └──────────────────────┘                  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        CALVINBOT BINANCE SYSTEM                          │
+│                                                                          │
+│  ┌──────────────────┐   Redis Stream    ┌──────────────────┐             │
+│  │ strategy_binance │ ──── signals ───► │  execution_bot   │ ──► Binance │
+│  │  🧠 Cerebro       │ ◄─── fills ────── │  💪 Músculo       │  Spot API  │
+│  └────────┬─────────┘                   └──────────────────┘             │
+│           │                                                              │
+│  ┌────────▼──────────────────┐    ┌──────────────────────┐               │
+│  │ dynamic_optimizer_binance │    │  watchdog_binance    │               │
+│  │  🔬 Científico (30 min)    │    │  🐕 Vigilante (20s)  │               │
+│  └───────────────────────────┘    └──────────────────────┘               │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────┐            │
+│  │  dashboard_server.py  →  http://servidor:8084            │            │
+│  │  📊 Dashboard dark TradingView-style en tiempo real       │            │
+│  └──────────────────────────────────────────────────────────┘            │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 🧠 calvin5.py — El Cerebro (Calculador de señales)
-- Monitorea los mercados BTC 5min en Polymarket via WebSocket
-- Lee el precio de BTC en tiempo real
-- Evalúa cada segundo si las condiciones son buenas para entrar
-- Publica señales de BUY/SELL a Redis para que el Músculo las ejecute
-- Gestiona las posiciones abiertas (TP, SL, hold a resolución)
+### 🧠 strategy_binance.py — El Cerebro
 
-### 💪 execution_bot.py — El Músculo (Ejecutor de órdenes)
-- Escucha señales de Redis
-- Llama a la API real de Polymarket (CLOB) para comprar/vender
-- En modo DRY RUN → simula el fill sin tocar dinero real
-- Devuelve el recibo del fill al Cerebro
+- Lee el precio de BTC en tiempo real desde Binance WebSocket
+- Evalúa momentum cada segundo: si BTC sube ≥ `BTC_MIN_PCT`% en `BTC_WINDOW` velas → señal BUY
+- Publica señales via **Redis Stream** (`signals:execution`) al Músculo
+- Gestiona posiciones abiertas: monitorea TP y SL en tiempo real
+- En arranque, reconcilia posiciones abiertas contra la API de Binance (elimina fantasmas)
+- Cada 60s recarga parámetros dinámicos desde Redis (`config:strategy_binance:current`)
+- Publica heartbeat en `state:strategy:latest` y guarda historial en `binance_trades.csv`
 
-### 🔬 dynamic_optimizer.py — El Científico (Optimizador)
-- Analiza el historial de trades en `calvin5_trades.csv`
-- Usa **Optimización Bayesiana** (Optuna) para encontrar los mejores parámetros
-- Publica los parámetros mejorados via Redis → el Cerebro los aplica sin reiniciar
+### 💪 execution_bot.py — El Músculo
 
-### 🐕 watchdog.py — El Vigilante (Supervisor)
-- Comprueba que todos los bots siguen vivos (heartbeats)
-- Reinicia automáticamente los que hayan caído
-- Alerta via Redis si algo va mal
+- Escucha la Redis Stream en busca de señales de compra/venta
+- En modo REAL: llama a la API de Binance para ejecutar órdenes de mercado
+- En modo DRY: simula fills con precio actual sin tocar dinero real
+- Gestiona stop-loss via órdenes nativas STOP_LOSS_LIMIT en Binance
+- Publica heartbeat en `state:executor:latest` con saldo USDT actualizado (caché 30s)
 
-### 📊 dashboard_server.py — La Vista (Web dashboard)
-- Servidor web en `http://localhost:8081`
-- Muestra el estado en tiempo real de todos los bots
-- Panel de control con kill switches por bot
-- Consola de logs unificada
+### 🔬 dynamic_optimizer_binance.py — El Científico
+
+- Corre cada 30 minutos analizando `binance_trades.csv`
+- Requiere mínimo **15 trades** para empezar a ajustar
+- Calcula un score: `win_rate/50 × 0.6 + profit_factor_norm × 0.4`
+- Si score > 1.15 → aumenta agresividad +5%; si score < 0.85 → la reduce -5%
+- Aplica suavizado 30%: los cambios son graduales, nunca bruscos
+- No modifica TP/SL si hay posiciones abiertas (evita inconsistencias con órdenes en Binance)
+- Publica parámetros en Redis (`config:strategy_binance:current`) → el Cerebro los aplica sin reiniciar
+
+### 🐕 watchdog_binance.py — El Vigilante
+
+- Comprueba heartbeats cada 20 segundos
+- Si un bot lleva >60s offline → alerta Telegram WARNING
+- Si un bot lleva >120s offline → reinicio automático vía `systemctl` + alerta CRITICAL
+- Máximo 3 reinicios por hora (protección contra crash loop)
+- Si ambos bots caen simultáneamente → reinicio de emergencia inmediato
+- Monitorea límites de pérdida via `loss_tracker` y drawdown de sesión
+- Si drawdown ≥ $80 → publica comando PAUSE al executor vía Redis
 
 ---
 
 ## Cómo toma las decisiones
 
-### La ventana sniper (¿cuándo mira?)
-
-El bot **no opera durante toda la ronda**. Solo activa la búsqueda en los **últimos 60 segundos** de cada ronda de 5 minutos.
+### Checklist de entrada (todos deben pasar)
 
 ```
-Ronda de 5 min (300s):
-│←─── NO ACTIVO (primeros 240s) ───────────►│←── SNIPER (60s) ──►│
-0s                                          240s               300s
+¿Es horario de trading (en_trading_hours)?              ✓ / ✗
+¿El executor no está en PAUSE?                          ✓ / ✗
+¿No se superó el límite de pérdida diaria?              ✓ / ✗
+¿Hay menos de MAX_POS posiciones abiertas?              ✓ / ✗
+¿Han pasado ≥ THROTTLE segundos desde la última entrada? ✓ / ✗
+¿BTC tiene momentum ≥ BTC_MIN_PCT% en BTC_WINDOW velas? ✓ / ✗
+→ Si todo OK: señal BUY → Redis Stream → execution_bot
 ```
 
-Esto es intencional: en los primeros minutos hay mucha incertidumbre. En los últimos 60 segundos, el mercado ya tiene más información y el precio de los tokens refleja mejor la probabilidad real.
+### Gestión de la posición
 
-### La checklist de entrada (todas deben pasar)
+Una vez abierta, el Cerebro monitorea cada segundo:
 
-Cada segundo dentro de la ventana sniper, el bot evalúa esta lista de filtros:
-
-```
-¿Estamos en la ventana sniper (últimos 60s)?          ✓ / ✗
-¿Es horario de trading (14:00-22:00 hora España)?     ✓ / ✗
-¿El Dashboard no ha pausado las entradas?             ✓ / ✗
-¿No se superó el límite de pérdida diaria?            ✓ / ✗
-¿No se activó el circuit breaker de sesión?           ✓ / ✗
-¿Hay menos de MAX_OPEN_POS posiciones abiertas?       ✓ / ✗
-¿No se superó MAX_ENTRIES_PER_ROUND esta ronda?       ✓ / ✗
-¿Han pasado ≥ THROTTLE_S segundos desde la última entrada? ✓ / ✗
-¿Quedan más de ENTRY_CUTOFF_S segundos (no demasiado tarde)? ✓ / ✗
-
-Para CADA LADO (UP y DOWN):
-  ¿El precio está en ENTRY_MIN–ENTRY_MAX?             ✓ / ✗
-  ¿El precio ha sido estable N scans?                 ✓ / ✗
-  ¿BTC tiene momentum ≥ BTC_MIN_PCT% en BTC_WINDOW_S? ✓ / ✗
-  ¿La dirección de BTC coincide con UP o DOWN?        ✓ / ✗
-  → Si todo OK: ¡ENTRADA!
-```
-
-### Los filtros de precio — ¿Por qué 0.62–0.90?
-
-```
-0.00  0.50  0.62        0.90  1.00
-  │     │    │            │    │
-  │  Too │  ZONA DE    │ Too │
-  │  cheap│  ENTRADA   │ exp │
-  │  risky│            │ ensive│
-```
-
-- **< 0.62 (muy barato):** El mercado no cree que vaya a ganar. Demasiado riesgo.
-- **0.62–0.90 (zona óptima):** Precio razonable con buen potencial de ganancia.
-- **> 0.90 (muy caro):** Poca ganancia potencial si gana, pérdida grande si pierde.
-
-### El momentum de BTC — La señal clave
-
-```
-BTC: ─────────────────/────────────────────
-                     ↗
-                  momentum +0.15% en 10s
-                  ↓
-                  Condición: ≥ 0.10% en 10s
-                  → SEÑAL UP VÁLIDA
-```
-
-Si BTC sube ≥ 0.10% en los últimos 10 segundos → señal **UP**
-Si BTC baja ≥ 0.10% en los últimos 10 segundos → señal **DOWN**
-
-### Cuándo cerrar la posición (salidas)
-
-Una vez dentro, el bot monitorea el precio cada segundo y sale en el primero que se cumpla:
-
-| Condición | Nombre | Qué significa |
-|-----------|--------|---------------|
-| Precio subió ≥ 25% desde entrada | **TP Full** | Ganancia grande, salida total |
-| Precio subió ≥ 9% y queda tiempo | **TP Mid** | Ganancia parcial, asegurar |
-| En últimos 15s, precio subió ≥ 4% | **TP Last** | Antes de resolución incierta |
-| Quedan ≤ 15s y precio ≥ 0.80 | **Hold** | Dejar resolver en 1.00 |
-| Precio cayó 7 cents desde entrada | **SL Drop** | Stop loss por caída |
-| Precio < 0.45 | **SL Floor** | BTC revirtió fuerte, salir ya |
-| Holding ≥ 230s sin recuperarse | **SL Time** | Llevas mucho tiempo perdiendo |
-| La ronda termina | **Round End** | Resolución automática (0% fee) |
-
-> **Nota importante sobre fees:** Polymarket cobra **3% del USDC recibido** en ventas anticipadas (TP/SL). Si el mercado resuelve solo (round_end), la fee es **0%**. Esto significa que el precio de break-even real es más alto que el precio de entrada.
+| Condición | Acción |
+|-----------|--------|
+| Precio subió ≥ TP% desde entrada | Cierre por Take Profit |
+| Precio cayó ≥ SL% desde entrada | Cierre por Stop Loss |
+| Posición abierta ≥ MAX_HOLD segundos | Cierre por tiempo máximo |
+| Señal de PAUSE del watchdog | Cierre inmediato de todo |
 
 ---
 
-## Parámetros configurables
+## Parámetros de riesgo (nivel inicial 7.5/10)
 
-Todos los parámetros que el optimizador puede ajustar:
+| Parámetro | Valor | Qué controla |
+|-----------|-------|--------------|
+| `STAKE_USD` | $75 | USDT por operación |
+| `BTC_MIN_PCT` | 0.08% | Momentum mínimo de BTC requerido |
+| `BTC_WINDOW` | 20 velas | Ventana para medir momentum |
+| `TP` | 2.0% | Take Profit |
+| `SL` | 0.8% | Stop Loss |
+| `MAX_POS` | 2 | Posiciones simultáneas máximas |
+| `THROTTLE_S` | 15s | Segundos mínimos entre entradas |
+| `MAX_HOLD_S` | 240s | Tiempo máximo de una posición abierta |
+| `DAILY_LOSS` | $100 | Pérdida diaria máxima antes de parar |
 
-### Filtros de entrada
+El optimizador puede ajustar todos estos parámetros dentro de los siguientes límites:
 
-| Parámetro | Default | Qué controla |
-|-----------|---------|--------------|
-| `ENTRY_MIN` | 0.62 | Precio mínimo para entrar |
-| `ENTRY_MAX` | 0.90 | Precio máximo para entrar |
-| `ENTRY_CUTOFF_S` | 40s | No entrar si quedan menos de N segundos |
-| `ENTRY_MAX_LATE` | 0.90 | ENTRY_MAX más restrictivo cuando queda poco tiempo |
-| `PRICE_STABILITY_SCANS` | 2 | Precio debe estar en rango N scans consecutivos |
-
-### Momentum de BTC
-
-| Parámetro | Default | Qué controla |
-|-----------|---------|--------------|
-| `BTC_MIN_PCT` | 0.10% | Mínimo de movimiento de BTC requerido |
-| `BTC_WINDOW_S` | 10s | Ventana de tiempo para medir el momentum |
-
-### Take Profit (salidas ganadoras)
-
-| Parámetro | Default | Qué controla |
-|-----------|---------|--------------|
-| `TP_FULL_PCT` | 25% | Ganancia para salida total |
-| `TP_MID_PCT` | 9% | Ganancia para salida parcial |
-| `TP_LAST_15S_PCT` | 4% | Ganancia en los últimos 15s para salir |
-| `HOLD_SECS` | 15s | Si quedan ≤ N segundos y precio ≥ 0.80, esperar resolución |
-| `HOLD_BTC_PCT` | 0.15% | BTC mínimo para mantener hold a resolución |
-
-### Stop Loss (salidas perdedoras)
-
-| Parámetro | Default | Qué controla |
-|-----------|---------|--------------|
-| `SL_DROP` | 0.07 | Salir si precio cae 7 cents desde entrada |
-| `SL_FLOOR` | 0.45 | Floor absoluto de precio (BTC revirtió) |
-| `SL_TIME_S` | 230s | Salir si llevas ≥ N segundos sin recuperarte |
-| `SL_LAST_30S_PCT` | 5% | En últimos 30s, SL relativo desde peak |
-
-### Gestión de riesgo
-
-| Parámetro | Default | Qué controla |
-|-----------|---------|--------------|
-| `STAKE_USD` | $5.00 | Dólares por operación |
-| `MAX_OPEN_POS` | 1 | Máximo de posiciones abiertas simultáneas |
-| `MAX_ENTRIES_PER_ROUND` | 2 | Máximo de entradas por ronda de 5 min |
-| `THROTTLE_S` | 2s | Segundos mínimos entre entradas consecutivas |
-| `SLIP_MAX_PCT` | 4% | Slippage máximo tolerado |
-| `FOK_PRICE_BUF` | 3% | Buffer de precio en la orden límite |
-
----
-
-## El optimizador — ¿Cómo aprende?
-
-El optimizador funciona como un **científico que hace experimentos**:
-
-1. **Lee el historial** de trades en `calvin5_trades.csv`
-2. **Hace pruebas** (50-150 trials por ciclo): "¿Qué habría pasado si ENTRY_MIN fuera 0.65 en lugar de 0.62?"
-3. **Simula** qué trades habrían ocurrido con esos parámetros
-4. **Puntúa** cada combinación con un score que combina:
-   - **Win Rate** (% de trades ganadores) — peso 25%
-   - **Sharpe Ratio** (consistencia riesgo/retorno) — peso 40%
-   - **Profit Factor** (ganancias totales / pérdidas totales) — peso 20%
-   - **PnL medio por trade** — peso 15%
-   - **Penalización por drawdown** (pérdida máxima acumulada)
-5. **Publica los mejores parámetros** via Redis → Calvin5 los aplica en vivo sin reiniciar
-
-```
-Ciclo del optimizador (cada 4 horas):
-  Leer CSV → Simular 100 combinaciones → Aplicar suavizado 30% → Publicar
-       ↑                                                              ↓
-  Nuevos trades                                              calvin5.py en vivo
-```
-
-**Suavizado del 30%:** El optimizador no aplica cambios bruscos. Si encuentra que ENTRY_MIN debería ser 0.70 y actualmente es 0.62, aplica: `0.62 + (0.70 - 0.62) × 0.30 = 0.644`. Esto evita sobrerreaccionar a una mala racha temporal.
+| Parámetro | Mínimo | Máximo |
+|-----------|--------|--------|
+| `STAKE_USD` | $20 | $200 |
+| `BTC_MIN_PCT` | 0.05% | 0.30% |
+| `BTC_WINDOW` | 15 velas | 60 velas |
+| `TP` | 1.0% | 4.0% |
+| `SL` | 0.5% | 2.0% |
 
 ---
 
 ## Circuit Breakers (protecciones de riesgo)
 
-El sistema tiene **4 niveles de protección** automática:
-
 ```
-Nivel 1: Throttle entre trades (THROTTLE_S)
-  → Mínimo 2s entre entradas para evitar trades duplicados
+Nivel 1: Throttle entre trades (THROTTLE_S = 15s)
+  → Mínimo 15s entre entradas consecutivas
 
-Nivel 2: Límites por ronda (MAX_ENTRIES_PER_ROUND)
-  → Máximo 2 entradas por ronda de 5 minutos
+Nivel 2: Posiciones simultáneas (MAX_POS = 2)
+  → Máximo 2 posiciones abiertas al mismo tiempo
 
-Nivel 3: Session Drawdown (SESSION_DRAWDOWN_LIMIT)
-  → Pausa automática si la ventana de PnL cae demasiado
+Nivel 3: Drawdown de sesión (DRAWDOWN_KILL = $80)
+  → Watchdog pausa el executor si la sesión pierde ≥ $80
 
-Nivel 4: Daily Loss Limit (DAILY_LOSS_LIMIT = $50)
-  → Stop total si la sesión pierde más de $50
+Nivel 4: Pérdida diaria (DAILY_LOSS = $100)
+  → La estrategia se detiene si la pérdida diaria supera $100
+
+Nivel 5: Crash loop protection (MAX_RESTARTS_PER_H = 3)
+  → El watchdog no reinicia más de 3 veces por hora
 ```
 
 ---
@@ -261,41 +155,57 @@ Nivel 4: Daily Loss Limit (DAILY_LOSS_LIMIT = $50)
 ## Cómo arrancar
 
 ### Requisitos previos
+
 ```bash
 # Redis corriendo
 redis-server
 
-# Dependencias instaladas
+# Dependencias
 pip install -r requirements.txt
 
 # Variables de entorno (.env)
-POLY_API_KEY=...       # Solo para modo REAL
-POLY_SECRET=...        # Solo para modo REAL
+BINANCE_API_KEY=...         # API key de Binance (Testnet o Real)
+BINANCE_API_SECRET=...      # Secret de Binance
+BINANCE_TESTNET=true        # false para real
+DRY_RUN=true                # false para operar con dinero real
 REDIS_URL=redis://localhost:6379
+TELEGRAM_BOT_TOKEN=...      # Para alertas
+TELEGRAM_CHAT_ID=...
 ```
 
-### Arranque
+### Arranque en producción (servidor Linux con systemd)
 
 ```bash
-# Paper trading (recomendado para probar)
-python start_all.py
+# Copiar servicios
+cp systemd/*.service /etc/systemd/system/
+systemctl daemon-reload
 
-# Dinero real
-python start_all.py --real
-
-# Sin optimizador (ahorra CPU)
-python start_all.py --no-optimizer
+# Activar y arrancar todos
+systemctl enable calvinbot-strategy calvinbot-executor calvinbot-optimizer calvinbot-watchdog calvinbot-dashboard
+systemctl start  calvinbot-strategy calvinbot-executor calvinbot-optimizer calvinbot-watchdog calvinbot-dashboard
 
 # Ver estado
-python start_all.py --status
+systemctl is-active calvinbot-strategy calvinbot-executor calvinbot-optimizer calvinbot-watchdog calvinbot-dashboard
 
-# Parar todo
-python start_all.py --stop
+# Ver logs en tiempo real
+journalctl -fu calvinbot-strategy
+tail -f /opt/calvinbot-binance/strategy_binance.log
 ```
 
-### Acceder al Dashboard
+### Deploy de actualizaciones
+
+```bash
+# En el servidor — pull y reinicio automático
+cd /opt/calvinbot-binance && bash deploy.sh
+
+# O manualmente
+git pull && systemctl restart calvinbot-strategy calvinbot-executor calvinbot-watchdog calvinbot-optimizer calvinbot-dashboard
 ```
-http://localhost:8081
+
+### Dashboard
+
+```
+http://TU_IP_SERVIDOR:8084
 ```
 
 ---
@@ -304,39 +214,49 @@ http://localhost:8081
 
 | Archivo | Qué es |
 |---------|--------|
-| `calvin5.py` | Bot principal (cerebro) |
-| `execution_bot.py` | Ejecutor de órdenes |
-| `dynamic_optimizer.py` | Optimizador bayesiano |
-| `watchdog.py` | Supervisor de procesos |
-| `dashboard_server.py` | Servidor web del dashboard |
-| `btc_price.py` | Feed de precio BTC en tiempo real |
-| `polymarket_simulator.py` | Simulador de paper trading |
-| `start_all.py` | Lanzador unificado |
-| `calvin5_trades.csv` | Historial de todos los trades |
-| `calvin5_open.json` | Posiciones abiertas actuales |
-| `calvinbot_pids.json` | PIDs de los procesos activos |
+| `strategy_binance.py` | Bot principal — señales y gestión de posiciones |
+| `execution_bot.py` | Ejecutor de órdenes en Binance |
+| `binance_exchange.py` | Adaptador para la API de Binance Spot |
+| `dynamic_optimizer_binance.py` | Optimizador rule-based de parámetros |
+| `watchdog_binance.py` | Supervisor con reinicio automático |
+| `dashboard_server.py` | Servidor web del dashboard (puerto 8084) |
+| `loss_tracker.py` | Módulo de control de pérdida diaria |
+| `utils.py` | Utilidades compartidas (Telegram, horarios) |
+| `deploy.sh` | Script de despliegue automático |
+| `systemd/` | Archivos de servicio para systemd |
+| `binance_trades.csv` | Historial de todos los trades |
+| `binance_open.json` | Posiciones abiertas actuales |
 | `.env` | Credenciales y config (no compartir) |
 
 ---
 
-## Glosario básico
+## Redis — Claves importantes
+
+| Clave | Tipo | Descripción |
+|-------|------|-------------|
+| `state:strategy:latest` | String (JSON) | Heartbeat del Cerebro (ISO timestamp) |
+| `state:executor:latest` | String (JSON) | Heartbeat del Músculo (float timestamp) |
+| `state:watchdog:latest` | String (JSON) | Heartbeat del Vigilante |
+| `signals:execution` | Stream | Canal de señales BUY/SELL Cerebro→Músculo |
+| `fills:strategy` | Stream | Canal de fills Músculo→Cerebro |
+| `config:strategy_binance:current` | String (JSON) | Parámetros activos (escrito por el optimizador) |
+| `emergency:commands` | PubSub | Canal para comandos PAUSE/RESUME del watchdog |
+
+---
+
+## Glosario
 
 | Término | Significado |
 |---------|-------------|
-| **Token UP/DOWN** | Lo que compras. Vale 1 USDC si aciertas, 0 si fallas |
-| **Precio del token** | Probabilidad implícita. 0.70 = 70% de que ese resultado pase |
-| **Momentum** | Velocidad y dirección del movimiento de BTC |
-| **TP (Take Profit)** | Precio al que vendemos para asegurar ganancia |
-| **SL (Stop Loss)** | Precio al que vendemos para limitar pérdida |
-| **Fill** | Confirmación de que la orden fue ejecutada |
-| **Slippage** | Diferencia entre el precio que pediste y el que conseguiste |
-| **FOK (Fill or Kill)** | Tipo de orden: se ejecuta completa o no se ejecuta |
-| **DRY RUN** | Modo simulado, sin dinero real |
-| **PnL** | Profit and Loss — ganancias y pérdidas |
-| **Drawdown** | Caída desde el máximo histórico de PnL |
+| **Momentum** | Velocidad y dirección del movimiento de BTC en una ventana de tiempo |
+| **TP (Take Profit)** | % de ganancia al que se cierra la posición automáticamente |
+| **SL (Stop Loss)** | % de pérdida al que se cierra la posición para limitar el daño |
+| **DRY RUN** | Modo simulado, sin dinero real, fills a precio de mercado |
+| **PnL** | Profit and Loss — ganancias y pérdidas acumuladas |
+| **Drawdown** | Caída desde el máximo de PnL de la sesión |
 | **Win Rate** | % de trades que terminaron en ganancia |
 | **Profit Factor** | Ganancias totales ÷ Pérdidas totales (>1 = rentable) |
-| **Sharpe Ratio** | Retorno por unidad de riesgo (más alto = más consistente) |
-| **CLOB** | Central Limit Order Book — el libro de órdenes de Polymarket |
-| **Redis** | Base de datos en memoria usada como canal de comunicación entre bots |
-| **Optuna** | Librería de optimización bayesiana usada por el optimizador |
+| **Heartbeat** | Estado que cada bot publica en Redis cada pocos segundos para confirmar que vive |
+| **Redis Stream** | Cola de mensajes persistente usada para comunicar señales entre bots |
+| **STOP_LOSS_LIMIT** | Orden nativa de Binance que activa un límite cuando el precio cae al nivel de stop |
+| **Testnet** | Entorno de pruebas de Binance con dinero ficticio (misma API, sin riesgo real) |

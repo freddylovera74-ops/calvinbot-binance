@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from utils import send_telegram_async
+import loss_tracker
 
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).parent
@@ -44,14 +45,16 @@ SMOOTH_FACTOR         = float(os.getenv("SMOOTH_FACTOR",       "0.30"))
 
 TRADES_CSV = BASE_DIR / "binance_trades.csv"
 
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+_log_handler = _RotatingFileHandler(
+    BASE_DIR / "optimizer_binance.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+_log_handler.setFormatter(logging.Formatter("%(asctime)s [OPT] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [OPT] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(BASE_DIR / "optimizer_binance.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=[_log_handler, logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("optimizer")
 
@@ -289,14 +292,27 @@ async def optimize_cycle(r: aioredis.Redis, cycle: int):
                 f"Optimizer Binance iniciado\n"
                 f"Params iniciales riesgo 7.5/10 publicados\n"
                 f"Esperando {MIN_TRADES_REQUIRED} trades para auto-regular.",
-                level="INFO", prefix_label="Optimizer"
+                level="INFO", prefix_label="CalvinBTC · Optimizer"
             )
         return
+
+    # Verificar límites de pérdida antes de ajustar
+    lt_status, lt_msg = loss_tracker.check()
+    if lt_status == loss_tracker.STATUS_BREACHED:
+        log.error(f"[LOSS BREACHED] Optimizer congelado — {lt_msg}")
+        return
+    if lt_status == loss_tracker.STATUS_WARNING:
+        log.warning(f"[LOSS WARNING] Optimizer en modo conservador — {lt_msg}")
 
     # Métricas sobre últimos 50 trades (recientes)
     recent   = trades[-50:]
     metrics  = compute_metrics(recent)
     score    = compute_score(metrics)
+
+    # Si hay WARNING de pérdidas, forzar score a modo conservador (no aumentar agresividad)
+    if lt_status == loss_tracker.STATUS_WARNING and score > 1.0:
+        log.warning(f"[LOSS WARNING] Score {score} ajustado a 1.0 para evitar aumento de riesgo")
+        score = 1.0
 
     current  = await load_current_params(r)
     new_params, reason = adjust_params(current, score)
@@ -321,13 +337,13 @@ async def optimize_cycle(r: aioredis.Redis, cycle: int):
             f"Score: {score} → {reason}\n"
             f"STAKE: ${new_params['STAKE_USD']} | BTC_MIN: {new_params['BTC_MIN_PCT']}%\n"
             f"TP: {new_params['TP_PCT']*100:.2f}% | SL: {new_params['SL_DROP_PCT']*100:.2f}%",
-            level="INFO", prefix_label="Optimizer"
+            level="INFO", prefix_label="CalvinBTC · Optimizer"
         )
 
 
 async def main():
     log.info("=" * 55)
-    log.info("  Dynamic Optimizer Binance — iniciando")
+    log.info("  CalvinBTC · Param Optimizer — iniciando")
     log.info(f"  Intervalo: {OPTIMIZE_INTERVAL_MIN} min | Min trades: {MIN_TRADES_REQUIRED}")
     log.info("=" * 55)
 

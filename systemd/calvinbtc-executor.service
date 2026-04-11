@@ -1,5 +1,5 @@
 [Unit]
-Description=CalvinBot — Execution Bot (Binance)
+Description=CalvinBTC · Trade Executor — Order Execution Engine (Binance Spot)
 After=network.target redis.service
 Wants=redis.service
 

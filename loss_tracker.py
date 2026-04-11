@@ -36,7 +36,7 @@ from typing import Optional, Tuple
 
 WEEKLY_LOSS_LIMIT  = float(os.getenv("WEEKLY_LOSS_LIMIT",  "150.0"))
 MONTHLY_LOSS_LIMIT = float(os.getenv("MONTHLY_LOSS_LIMIT", "400.0"))
-LOSS_FILE          = "calvin5_loss_limits.json"
+LOSS_FILE          = "binance_loss_limits.json"
 
 # Estados posibles
 STATUS_OK       = "ok"

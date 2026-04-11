@@ -94,13 +94,16 @@ _unified_handler.setLevel(logging.INFO)
 
 
 def _setup_logger() -> logging.Logger:
+    from logging.handlers import RotatingFileHandler
     logger = logging.getLogger("execution_bot")
     logger.setLevel(logging.DEBUG)
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)-8s [EXECUTOR] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    fh = logging.FileHandler("executor.log", encoding="utf-8")
+    fh = RotatingFileHandler(
+        "executor.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
     fh.setFormatter(fmt)
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
@@ -2062,7 +2065,7 @@ class ExecutionBot:
     async def run(self) -> None:
         """Lanza el bot: conexiones + tareas paralelas."""
         log.info("=" * 65)
-        log.info(f"ExecutionBot iniciando — DRY_RUN={DRY_RUN}")
+        log.info(f"CalvinBTC · Trade Executor iniciando — DRY_RUN={DRY_RUN}")
         log.info(f"  MAX_ORDER_USD=${MAX_ORDER_VALUE_USD} | "
                  f"MAX_DAILY_TRADES={MAX_DAILY_TRADES} | "
                  f"SLIP_MAX={SLIP_MAX_PCT*100:.0f}%")
