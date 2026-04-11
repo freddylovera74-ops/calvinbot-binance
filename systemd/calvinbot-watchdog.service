@@ -1,0 +1,18 @@
+[Unit]
+Description=CalvinBot — Watchdog Binance
+After=network.target redis.service calvinbot-strategy.service calvinbot-executor.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/calvinbot-binance
+EnvironmentFile=/opt/calvinbot-binance/.env
+ExecStart=/opt/calvinbot-binance/.venv/bin/python watchdog_binance.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

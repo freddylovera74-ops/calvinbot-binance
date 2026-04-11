@@ -59,34 +59,37 @@ from utils import madrid_now, in_trading_hours, write_json_atomic, send_telegram
 SYMBOL           = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 BASE_ASSET       = SYMBOL.replace("USDT", "")  # "BTC"
 
-# Sizing
-STAKE_USD        = float(os.getenv("STAKE_USD_OVERRIDE", "50.0"))  # USDT por operación
+# Sizing — defaults riesgo 7.5/10 (el optimizer los ajusta dinámicamente)
+STAKE_USD        = float(os.getenv("STAKE_USD_OVERRIDE", "75.0"))  # USDT por operación
 
 # BTC Momentum — filtro de entrada
-BTC_WINDOW_S     = int(os.getenv("BTC_WINDOW_S",   "30"))    # ventana momentum (s)
-BTC_MIN_PCT      = float(os.getenv("BTC_MIN_PCT",  "0.10"))  # % mínimo de movimiento
+BTC_WINDOW_S     = int(os.getenv("BTC_WINDOW_S",   "20"))    # ventana momentum (s)
+BTC_MIN_PCT      = float(os.getenv("BTC_MIN_PCT",  "0.08"))  # % mínimo de movimiento
 
 # Take Profit (% desde precio de entrada)
-TP_PCT           = float(os.getenv("TP_PCT",       "0.015")) # 1.5% TP principal
-TP_PARTIAL_PCT   = float(os.getenv("TP_PARTIAL_PCT","0.008"))# 0.8% TP parcial (50%)
+TP_PCT           = float(os.getenv("TP_PCT",       "0.020")) # 2.0% TP principal
+TP_PARTIAL_PCT   = float(os.getenv("TP_PARTIAL_PCT","0.010"))# 1.0% TP parcial (50%)
 
 # Stop Loss — pasado a execution_bot para colocar STOP_LOSS_LIMIT nativo
-SL_DROP_PCT      = float(os.getenv("SL_DROP_PCT",  "0.010")) # 1% debajo de entrada
+SL_DROP_PCT      = float(os.getenv("SL_DROP_PCT",  "0.008")) # 0.8% debajo de entrada
 
 # Tiempo máximo en posición (segundos) antes de cerrar a mercado
-MAX_HOLD_S       = int(os.getenv("MAX_HOLD_S",    "300"))   # 5 minutos máximo
+MAX_HOLD_S       = int(os.getenv("MAX_HOLD_S",    "240"))   # 4 minutos máximo
 
 # Anti-entrada rápida: mínimo entre entradas consecutivas
-THROTTLE_S       = int(os.getenv("THROTTLE_S",     "30"))   # 30s entre entradas
+THROTTLE_S       = int(os.getenv("THROTTLE_S",     "15"))   # 15s entre entradas
 
 # Máximo de posiciones simultáneas
-MAX_OPEN_POS     = int(os.getenv("MAX_OPEN_POS",   "1"))    # conservador
+MAX_OPEN_POS     = int(os.getenv("MAX_OPEN_POS",   "2"))    # 2 posiciones simultáneas
 
 # Slippage máximo aceptado (para rechazar fills malos)
 SLIP_MAX_PCT     = float(os.getenv("SLIP_MAX_PCT", "0.004")) # 0.4%
 
 # Circuit breaker: pérdida máxima de sesión
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "50.0"))
+DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "100.0"))
+
+# Key Redis donde el optimizer publica parámetros ajustados
+REDIS_KEY_PARAMS = "config:strategy_binance:current"
 
 # Horario de operación (hora Madrid)
 TRADING_HOUR_START = int(os.getenv("TRADING_HOUR_START", "9"))
@@ -751,13 +754,55 @@ async def _heartbeat_loop() -> None:
 #  MAIN LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
+_last_param_reload = 0.0
+_PARAM_RELOAD_INTERVAL = 60.0  # recargar params del optimizer cada 60s
+
+
+async def _reload_dynamic_params() -> None:
+    """Lee params ajustados por el optimizer desde Redis y los aplica globalmente."""
+    global STAKE_USD, BTC_MIN_PCT, BTC_WINDOW_S, TP_PCT, TP_PARTIAL_PCT
+    global SL_DROP_PCT, MAX_OPEN_POS, THROTTLE_S, MAX_HOLD_S, DAILY_LOSS_LIMIT
+    global _last_param_reload
+
+    if time.time() - _last_param_reload < _PARAM_RELOAD_INTERVAL:
+        return
+    _last_param_reload = time.time()
+
+    try:
+        if not _redis:
+            return
+        raw = await _redis.get(REDIS_KEY_PARAMS)
+        if not raw:
+            return
+        data   = json.loads(raw)
+        params = data.get("params", {})
+        if not params:
+            return
+
+        STAKE_USD        = float(params.get("STAKE_USD",      STAKE_USD))
+        BTC_MIN_PCT      = float(params.get("BTC_MIN_PCT",    BTC_MIN_PCT))
+        BTC_WINDOW_S     = int(params.get("BTC_WINDOW_S",     BTC_WINDOW_S))
+        TP_PCT           = float(params.get("TP_PCT",         TP_PCT))
+        TP_PARTIAL_PCT   = float(params.get("TP_PARTIAL_PCT", TP_PARTIAL_PCT))
+        SL_DROP_PCT      = float(params.get("SL_DROP_PCT",    SL_DROP_PCT))
+        MAX_OPEN_POS     = int(params.get("MAX_OPEN_POS",     MAX_OPEN_POS))
+        THROTTLE_S       = int(params.get("THROTTLE_S",       THROTTLE_S))
+        MAX_HOLD_S       = int(params.get("MAX_HOLD_S",       MAX_HOLD_S))
+        DAILY_LOSS_LIMIT = float(params.get("DAILY_LOSS_LIMIT", DAILY_LOSS_LIMIT))
+    except Exception as ex:
+        _lwarn(f"[PARAMS] Error recargando params dinámicos: {ex}")
+
+
 async def _main_loop() -> None:
     """Loop principal: scan → entrada → gestión de posiciones."""
     _linfo(f"[MAIN] Iniciando strategy_binance | DRY_RUN={DRY_RUN} | symbol={SYMBOL}")
-    _linfo(f"[MAIN] TP={TP_PCT:.1%} SL={SL_DROP_PCT:.1%} STAKE=${STAKE_USD:.2f}")
+    _linfo(f"[MAIN] TP={TP_PCT:.1%} SL={SL_DROP_PCT:.1%} STAKE=${STAKE_USD:.2f} [riesgo 7.5/10]")
 
     while True:
         try:
+            # Recargar params del optimizer (cada 60s)
+            await _reload_dynamic_params()
+
             # Verificar circuit breaker de loss_tracker
             lt_status, lt_msg = loss_tracker.check()
             if lt_status == loss_tracker.STATUS_BREACHED:
