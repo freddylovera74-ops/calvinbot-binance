@@ -323,7 +323,7 @@ def _check_entry_conditions() -> Tuple[bool, str, str]:
         return False, "", "fuera de horario de operación"
 
     # Verificar momentum BTC
-    btc_price_current = bp.get_last_price()
+    btc_price_current = bp.get_btc_price()
     if btc_price_current is None:
         return False, "", "sin precio BTC"
 
@@ -352,7 +352,7 @@ async def _open_position() -> None:
     if not can_enter:
         return
 
-    btc_price = bp.get_last_price()
+    btc_price = bp.get_btc_price()
     if btc_price is None:
         return
 
@@ -451,7 +451,7 @@ async def _manage_positions() -> None:
     """
     global _open_pos, _session_pnl
 
-    btc_price = bp.get_last_price()
+    btc_price = bp.get_btc_price()
     if btc_price is None:
         return
 
@@ -687,7 +687,7 @@ async def _heartbeat_loop() -> None:
     while True:
         try:
             if _redis:
-                btc = bp.get_last_price()
+                btc = bp.get_btc_price()
                 hb = {
                     "bot":           "strategy_binance",
                     "status":        "online",
