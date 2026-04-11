@@ -1952,7 +1952,7 @@ class ExecutionBot:
 
                 for _stream, messages in results:
                     for msg_id, fields in messages:
-                        raw = fields.get("data", "")
+                        raw = fields.get("payload") or fields.get("data", "")
                         if self._paused:
                             log.warning(
                                 f"[STREAM] Señal IGNORADA (bot pausado): {self._pause_reason}"
