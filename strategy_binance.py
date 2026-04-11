@@ -800,6 +800,18 @@ async def main() -> None:
     # Cargar posiciones persistidas
     _load_open_positions()
 
+    # Notificación de arranque
+    mode_label = "DRY RUN" if DRY_RUN else "REAL TESTNET"
+    open_count = len(_open_pos)
+    msg = (
+        f"CalvinBot Binance arrancó\n"
+        f"Modo: {mode_label}\n"
+        f"Symbol: {SYMBOL} | Stake: ${STAKE_USD}\n"
+        f"TP: {TP_PCT*100:.1f}% | SL: {SL_DROP_PCT*100:.1f}%\n"
+        f"Posiciones abiertas cargadas: {open_count}"
+    )
+    await send_telegram_async(msg, level="INFO", prefix_label="BinanceBot")
+
     # Iniciar tareas paralelas
     await asyncio.gather(
         bp.run_btc_poller(),
