@@ -1436,6 +1436,12 @@ class ExecutionBot:
         while True:
             try:
                 if self._redis_pub:
+                    # Consultar balance USDT (cada heartbeat)
+                    try:
+                        balance_usdt = await self.exchange.fetch_balance()
+                    except Exception:
+                        balance_usdt = None
+
                     hb_data = {
                         "timestamp":    str(time.time()),
                         "uptime_s":     str(round(time.time() - self._start_time)),
@@ -1444,6 +1450,7 @@ class ExecutionBot:
                         "pause_reason": self._pause_reason[:120] if self._pause_reason else "",
                         "circuit_open": "true" if self.circuit_breaker.is_open else "false",
                         "bot":          "executor",
+                        "balance_usdt": str(round(balance_usdt, 2)) if balance_usdt is not None else "",
                     }
 
                     # Clave persistente: watchdog la lee con .get() para detectar ausencia

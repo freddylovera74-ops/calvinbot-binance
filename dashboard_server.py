@@ -246,7 +246,10 @@ async def collect_state() -> dict:
                 k: v for k, v in strategy.items()
                 if k not in ("positions_data", "params", "btc_history")
             }},
-            "executor": {"alive": executor_alive, "data": executor},
+            "executor": {"alive": executor_alive, "data": {
+                **executor,
+                "balance_usdt": executor.get("balance_usdt", ""),
+            }},
         },
 
         # Params
@@ -509,8 +512,8 @@ _HTML = r"""<!DOCTYPE html>
       <div class="kpi-sub" id="kpi-unrealized">unrealized: —</div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">Symbol</div>
-      <div class="kpi-value neu" id="kpi-symbol">BTC/USDT</div>
+      <div class="kpi-label">Saldo USDT</div>
+      <div class="kpi-value neu" id="kpi-balance">—</div>
       <div class="kpi-sub" id="kpi-stake">stake: —</div>
     </div>
   </div>
@@ -683,9 +686,10 @@ function applyState(s) {
   }, 0);
   $('kpi-unrealized').textContent = 'unrealized: ' + fmtP(totalUnreal) + ' USDT';
 
-  $('kpi-symbol').textContent = s.symbol || 'BTC/USDT';
+  const bal = parseFloat(s.bots?.executor?.data?.balance_usdt || '0');
+  $('kpi-balance').textContent = bal > 0 ? '$' + Number(bal).toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' USDT' : '—';
   const params = s.params || {};
-  $('kpi-stake').textContent = 'stake: $' + fmt(params.STAKE_USD ?? 0);
+  $('kpi-stake').textContent = 'stake: $' + fmt(params.STAKE_USD ?? 0) + ' | ' + (s.symbol || 'BTC/USDT');
 
   // Charts — BTC
   if (s.btc_history && s.btc_history.length) {
