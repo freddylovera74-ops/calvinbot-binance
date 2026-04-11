@@ -1436,11 +1436,16 @@ class ExecutionBot:
         while True:
             try:
                 if self._redis_pub:
-                    # Consultar balance USDT (cada heartbeat)
-                    try:
-                        balance_usdt = await self.exchange.fetch_balance()
-                    except Exception:
-                        balance_usdt = None
+                    # Consultar balance USDT con cache de 30s para no quemar rate limit
+                    now_ts = time.time()
+                    if not hasattr(self, '_balance_cache') or \
+                       now_ts - self._balance_cache.get('ts', 0) > 30:
+                        try:
+                            bal = await self.exchange.fetch_balance()
+                            self._balance_cache = {'v': bal, 'ts': now_ts}
+                        except Exception:
+                            self._balance_cache = getattr(self, '_balance_cache', {'v': None, 'ts': 0})
+                    balance_usdt = self._balance_cache.get('v')
 
                     hb_data = {
                         "timestamp":    str(time.time()),

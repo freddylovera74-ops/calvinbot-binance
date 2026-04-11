@@ -23,6 +23,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Tuple
 
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
@@ -72,7 +73,7 @@ def _restarts_this_hour() -> int:
 #  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _bot_alive(data: dict, max_age_s: int = HEARTBEAT_MAX_S) -> Tuple_:
+def _bot_alive(data: dict, max_age_s: int = HEARTBEAT_MAX_S) -> Tuple[bool, float]:
     """Devuelve (alive: bool, age_s: float)."""
     ts_raw = data.get("timestamp")
     if not ts_raw:
@@ -225,38 +226,37 @@ async def check_cycle(r: aioredis.Redis, strategy_st: BotState, executor_st: Bot
 
     # ── 5. Límites de pérdida ───────────────────────────────────────────────
     try:
-        lt_status = loss_tracker.check()
-        status    = lt_status.get("status", "ok")
-        summary   = loss_tracker.get_summary()
+        # loss_tracker.check() devuelve Tuple[str, str] → (status, message)
+        lt_status, lt_msg = loss_tracker.check()
 
-        session_pnl = strat_data.get("session_pnl", 0.0) or 0.0
+        session_pnl = float(strat_data.get("session_pnl", 0.0) or 0.0)
         drawdown    = abs(min(session_pnl, 0.0))
 
-        if status == "breached":
-            log.error(f"LOSS LIMIT BREACHED — {lt_status.get('message')}")
+        if lt_status == loss_tracker.STATUS_BREACHED:
+            log.error(f"LOSS LIMIT BREACHED — {lt_msg}")
             _pause_executor(None)
             await send_telegram_async(
-                f"LÍMITE DE PÉRDIDA SUPERADO\n{lt_status.get('message')}\n"
+                f"LIMITE DE PERDIDA SUPERADO\n{lt_msg}\n"
                 f"Session PnL: ${session_pnl:.2f}",
                 level="CRITICAL", prefix_label="Watchdog"
             )
 
-        elif status == "warning":
-            log.warning(f"Loss limit WARNING — {lt_status.get('message')}")
+        elif lt_status == loss_tracker.STATUS_WARNING:
+            log.warning(f"Loss limit WARNING — {lt_msg}")
 
         if drawdown >= DRAWDOWN_KILL:
-            log.error(f"DRAWDOWN KILL — sesión PnL: ${session_pnl:.2f}")
+            log.error(f"DRAWDOWN KILL — sesion PnL: ${session_pnl:.2f}")
             _pause_executor(None)
             await send_telegram_async(
-                f"DRAWDOWN KILL activado\nPérdida sesión: ${session_pnl:.2f}\n"
-                f"Límite: ${DRAWDOWN_KILL}",
+                f"DRAWDOWN KILL activado\nPerdida sesion: ${session_pnl:.2f}\n"
+                f"Limite: ${DRAWDOWN_KILL}",
                 level="CRITICAL", prefix_label="Watchdog"
             )
         elif drawdown >= DRAWDOWN_WARN:
             log.warning(f"Drawdown WARNING — ${session_pnl:.2f}")
 
     except Exception as ex:
-        log.debug(f"Error verificando loss limits: {ex}")
+        log.error(f"Error verificando loss limits: {ex}")
 
     # ── 6. Heartbeat del watchdog al Redis ─────────────────────────────────
     try:
@@ -307,10 +307,6 @@ async def main():
         except Exception as ex:
             log.error(f"Error en ciclo watchdog: {ex}")
         await asyncio.sleep(CHECK_INTERVAL_S)
-
-
-# Fix: agregar import de Tuple que falta
-from typing import Tuple as Tuple_
 
 if __name__ == "__main__":
     asyncio.run(main())

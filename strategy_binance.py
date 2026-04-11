@@ -50,6 +50,7 @@ import btc_price as bp
 from metrics import metrics
 import loss_tracker
 from utils import madrid_now, in_trading_hours, write_json_atomic, send_telegram_async
+from binance_exchange import BinanceSpotExchange
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURACIÓN
@@ -640,10 +641,71 @@ def _load_open_positions() -> None:
         if _open_pos:
             _lwarn(
                 f"[PERSIST] {len(_open_pos)} posiciones cargadas desde disco — "
-                f"VERIFICAR MANUALMENTE que siguen abiertas en Binance"
+                f"reconciliando contra Binance..."
             )
     except Exception as exc:
         _lwarn(f"[PERSIST] Error cargando posiciones: {exc}")
+
+
+async def _reconcile_positions_at_startup() -> None:
+    """
+    Cruza posiciones en memoria contra Binance real al arrancar.
+    Elimina posiciones cuyo stop-loss ya fue ejecutado mientras el bot estaba caído.
+    Solo actúa en modo REAL — en DRY_RUN no hay órdenes reales que verificar.
+    """
+    global _open_pos, _session_pnl
+
+    if DRY_RUN or not _open_pos:
+        return
+
+    _linfo(f"[RECONCILE] Verificando {len(_open_pos)} posiciones contra Binance...")
+
+    try:
+        exchange = BinanceSpotExchange()
+        exchange.initialize()
+        await exchange._async_init()
+
+        # Convertir lista de Position a dict {position_id: {...}} que espera reconcile
+        tracked = {
+            p.position_id: {
+                "token_id":      p.symbol,
+                "stop_order_id": p.stop_order_id,
+                "entry_price":   p.entry_price,
+                "qty_base":      p.qty_base,
+                "size_usd":      p.size_usd,
+            }
+            for p in _open_pos
+        }
+
+        active_dict = await exchange.reconcile_open_positions(tracked)
+
+        # Reconstruir la lista conservando solo las posiciones activas
+        active_ids  = set(active_dict.keys())
+        closed_pos  = [p for p in _open_pos if p.position_id not in active_ids]
+        _open_pos   = [p for p in _open_pos if p.position_id in active_ids]
+
+        if closed_pos:
+            _lwarn(
+                f"[RECONCILE] {len(closed_pos)} posiciones eliminadas "
+                f"(SL ejecutado por Binance mientras el bot estaba caído): "
+                + ", ".join(p.position_id[:8] for p in closed_pos)
+            )
+            # Registrar el cierre en el CSV con PnL aproximado
+            btc_now = bp.get_btc_price() or 0.0
+            for p in closed_pos:
+                pnl_approx = (p.sl_price - p.entry_price) * p.qty_base  # estimado por SL
+                _log_trade_csv("CLOSE", p, p.sl_price, pnl_approx, "SL_BINANCE_OFFLINE")
+                _session_pnl += pnl_approx
+
+            _save_open_positions()
+
+        if _open_pos:
+            _linfo(f"[RECONCILE] {len(_open_pos)} posiciones confirmadas activas en Binance")
+        else:
+            _linfo("[RECONCILE] Sin posiciones activas — arrancando limpio")
+
+    except Exception as exc:
+        _lwarn(f"[RECONCILE] Error durante reconciliación: {exc} — manteniendo posiciones de disco")
 
 
 def _log_trade_csv(
@@ -779,16 +841,23 @@ async def _reload_dynamic_params() -> None:
         if not params:
             return
 
+        # Params seguros para nuevas entradas — siempre se aplican
         STAKE_USD        = float(params.get("STAKE_USD",      STAKE_USD))
         BTC_MIN_PCT      = float(params.get("BTC_MIN_PCT",    BTC_MIN_PCT))
         BTC_WINDOW_S     = int(params.get("BTC_WINDOW_S",     BTC_WINDOW_S))
-        TP_PCT           = float(params.get("TP_PCT",         TP_PCT))
-        TP_PARTIAL_PCT   = float(params.get("TP_PARTIAL_PCT", TP_PARTIAL_PCT))
-        SL_DROP_PCT      = float(params.get("SL_DROP_PCT",    SL_DROP_PCT))
         MAX_OPEN_POS     = int(params.get("MAX_OPEN_POS",     MAX_OPEN_POS))
         THROTTLE_S       = int(params.get("THROTTLE_S",       THROTTLE_S))
         MAX_HOLD_S       = int(params.get("MAX_HOLD_S",       MAX_HOLD_S))
         DAILY_LOSS_LIMIT = float(params.get("DAILY_LOSS_LIMIT", DAILY_LOSS_LIMIT))
+
+        # Params que afectan posiciones abiertas — solo aplicar si no hay posiciones
+        # Cambiar TP/SL mientras hay una posición abierta crea inconsistencia con
+        # el stop order ya colocado en Binance y el tracker interno.
+        if not _open_pos:
+            TP_PCT         = float(params.get("TP_PCT",         TP_PCT))
+            TP_PARTIAL_PCT = float(params.get("TP_PARTIAL_PCT", TP_PARTIAL_PCT))
+            SL_DROP_PCT    = float(params.get("SL_DROP_PCT",    SL_DROP_PCT))
+
     except Exception as ex:
         _lwarn(f"[PARAMS] Error recargando params dinámicos: {ex}")
 
@@ -842,8 +911,9 @@ async def main() -> None:
     await _redis.ping()
     _linfo(f"[REDIS] Conectado: {REDIS_URL}")
 
-    # Cargar posiciones persistidas
+    # Cargar posiciones persistidas y reconciliar contra Binance
     _load_open_positions()
+    await _reconcile_positions_at_startup()
 
     # Notificación de arranque
     mode_label = "DRY RUN" if DRY_RUN else "REAL TESTNET"
