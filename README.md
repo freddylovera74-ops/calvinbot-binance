@@ -1,4 +1,4 @@
-# CalvinBot — Sistema de Trading Automático para Polymarket
+# CalvinBot — Sistema de Trading Automático para Binance
 
 > **Mercados:** BTC Up/Down 5 minutos en Polymarket
 > **Estrategia:** BTC Momentum Sniper
