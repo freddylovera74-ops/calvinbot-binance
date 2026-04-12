@@ -150,6 +150,7 @@ def _validate_env_vars() -> None:
 MAX_ORDER_VALUE_USD  = float(os.getenv("MAX_ORDER_VALUE_USD", "200.0"))  # orden máxima en $
 MAX_DAILY_TRADES     = int(os.getenv("MAX_DAILY_TRADES", "200"))          # órdenes máximas por día
 SLIP_MAX_PCT         = float(os.getenv("SLIP_MAX_PCT", "0.04"))           # slippage máx aceptado
+MICRO_TEST           = False                                               # modo micro-test deshabilitado
 
 # Timeout máximo esperando fill del exchange antes de reportar fallo
 FILL_TIMEOUT_S = 10.0
