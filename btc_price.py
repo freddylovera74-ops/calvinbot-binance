@@ -4,9 +4,8 @@ btc_price.py — Feed de precio BTC/USDT desde Binance API pública.
 Polling REST cada 2 segundos. No requiere autenticación.
 Calcula momentum: variación % del precio en ventana deslizante.
 
-El momentum es la ventaja real sobre el 50% WR del sniper anterior:
-  BTC sube +0.2% en 60s → el token UP de Polymarket debería seguir
-  → entramos antes de que el crowd actualice sus órdenes en el CLOB
+Ejemplo de señal:
+  BTC: $95,000 hace 30s → $95,038 ahora → (+0.04%, 'UP') → señal de entrada
 """
 
 import asyncio

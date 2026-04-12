@@ -212,9 +212,25 @@ class ExecutionReceipt:
 
 from binance_exchange import BinanceSpotExchange
 
+# EXCHANGE_TYPE=futures → Binance USDT-M Futures con apalancamiento
+# EXCHANGE_TYPE=spot    → Binance Spot sin apalancamiento (default)
+_EXCHANGE_TYPE = os.getenv("EXCHANGE_TYPE", "spot").lower()
 
-def _create_exchange() -> BinanceSpotExchange:
-    """Instancia el adaptador de exchange Binance Spot."""
+
+def _create_exchange():
+    """
+    Instancia el adaptador de exchange según EXCHANGE_TYPE:
+      spot    → BinanceSpotExchange  (compra/venta directa, sin apalancamiento)
+      futures → BinanceFuturesExchange (USDT-M Perpetual, apalancamiento x20)
+    """
+    if _EXCHANGE_TYPE == "futures":
+        from binance_futures_exchange import BinanceFuturesExchange
+        log.info(
+            f"[FACTORY] Cargando BinanceFuturesExchange "
+            f"(leverage=x{os.getenv('LEVERAGE','20')} symbol={os.getenv('BINANCE_SYMBOL','BTCUSDT')})"
+        )
+        return BinanceFuturesExchange()
+
     log.info("[FACTORY] Cargando BinanceSpotExchange")
     return BinanceSpotExchange()
 

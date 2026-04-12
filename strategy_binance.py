@@ -54,8 +54,8 @@ BASE_ASSET       = SYMBOL.replace("USDT", "")
 
 # Sizing — defaults riesgo 7.5/10
 STAKE_USD        = float(os.getenv("STAKE_USD_OVERRIDE", "75.0"))
-BTC_WINDOW_S     = int(os.getenv("BTC_WINDOW_S",   "20"))
-BTC_MIN_PCT      = float(os.getenv("BTC_MIN_PCT",  "0.08"))
+BTC_WINDOW_S     = int(os.getenv("BTC_WINDOW_S",   "30"))    # ventana momentum (s)
+BTC_MIN_PCT      = float(os.getenv("BTC_MIN_PCT",  "0.04"))  # 0.04% en 30s — equilibrio señal/ruido
 TP_PCT           = float(os.getenv("TP_PCT",       "0.020"))
 TP_PARTIAL_PCT   = float(os.getenv("TP_PARTIAL_PCT","0.010"))
 SL_DROP_PCT      = float(os.getenv("SL_DROP_PCT",  "0.008"))
@@ -68,6 +68,8 @@ DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "100.0"))
 REDIS_KEY_PARAMS     = "config:strategy_binance:current"
 TRADING_HOUR_START   = int(os.getenv("TRADING_HOUR_START", "9"))
 TRADING_HOUR_END     = int(os.getenv("TRADING_HOUR_END",   "22"))
+# Pon DISABLE_TRADING_HOURS=true en .env para operar 24/7 (ideal en testnet)
+DISABLE_TRADING_HOURS = os.getenv("DISABLE_TRADING_HOURS", "false").lower() == "true"
 SCAN_INTERVAL_S      = float(os.getenv("SCAN_INTERVAL_S", "1.0"))
 DRY_RUN              = "--real" not in sys.argv and os.getenv("DRY_RUN", "true").lower() == "true"
 TRADES_CSV           = "binance_trades.csv"
@@ -141,6 +143,7 @@ class SignalEngine:
         self.entries_paused:   bool                      = False
         self.pending_receipts: Dict[str, asyncio.Future] = {}
         self.last_param_reload: float                    = 0.0
+        self._last_blocked_log:  float                   = 0.0   # throttle del log de bloqueo
 
         # ── Parámetros dinámicos (copiados de module-level, overwrite por optimizer) ──
         self.stake_usd        = STAKE_USD
@@ -289,8 +292,8 @@ class SignalEngine:
         if self.session_pnl <= -self.daily_loss_limit:
             return False, "", f"circuit breaker: PnL sesión ${self.session_pnl:.2f}"
 
-        if not in_trading_hours(TRADING_HOUR_START, TRADING_HOUR_END):
-            return False, "", "fuera de horario de operación"
+        if not DISABLE_TRADING_HOURS and not in_trading_hours(TRADING_HOUR_START, TRADING_HOUR_END):
+            return False, "", f"fuera de horario Madrid ({TRADING_HOUR_START}h-{TRADING_HOUR_END}h)"
 
         btc_price_current = bp.get_btc_price()
         if btc_price_current is None:
@@ -312,6 +315,18 @@ class SignalEngine:
         """Intenta abrir una posición LONG en BTC."""
         can_enter, direction, reason = self._check_entry_conditions()
         if not can_enter:
+            # Log periódico (cada 60s) para diagnosticar por qué no entra
+            now = time.time()
+            if now - self._last_blocked_log >= 60:
+                self._last_blocked_log = now
+                btc = bp.get_btc_price()
+                mom_pct, mom_dir = bp.get_momentum(window_s=self.btc_window_s)
+                _log.info(
+                    f"[SCAN] sin entrada — {reason} | "
+                    f"BTC=${btc:.2f} mom={mom_pct:+.4f}% dir={mom_dir} "
+                    f"pos={len(self.open_pos)}/{self.max_open_pos} "
+                    f"pnl={self.session_pnl:+.2f}$ paused={self.entries_paused}"
+                )
             return
 
         btc_price = bp.get_btc_price()
@@ -794,15 +809,15 @@ class SignalEngine:
 
     async def run(self) -> None:
         """Punto de entrada — conecta Redis y lanza todas las tareas."""
-        _log.info("=" * 60)
         mode_label = "DRY RUN (paper trading)" if DRY_RUN else "REAL MONEY"
-        _log.info(f"  CalvinBTC · Signal Engine — Binance Spot [{mode_label}]")
-        _log.info(f"  Símbolo: {SYMBOL}  |  Stake: ${self.stake_usd:.2f}  |  Max pos: {self.max_open_pos}")
-        _log.info("=" * 60)
-        self._linfo("=" * 60)
-        self._linfo(f"  CalvinBTC · Signal Engine — Binance Spot [{mode_label}]")
-        self._linfo(f"  Símbolo: {SYMBOL}  |  Stake: ${self.stake_usd:.2f}  |  Max pos: {self.max_open_pos}")
-        self._linfo("=" * 60)
+        exchange_type = os.getenv("EXCHANGE_TYPE", "spot").upper()
+        hours_label = "24/7" if DISABLE_TRADING_HOURS else f"{TRADING_HOUR_START}h-{TRADING_HOUR_END}h Madrid"
+        self._linfo("=" * 65)
+        self._linfo(f"  CalvinBTC · Signal Engine [{mode_label}] [{exchange_type}]")
+        self._linfo(f"  Símbolo: {SYMBOL} | Stake: ${self.stake_usd:.2f} | Max pos: {self.max_open_pos}")
+        self._linfo(f"  Momentum: {self.btc_min_pct:.3f}% en {self.btc_window_s}s | Horario: {hours_label}")
+        self._linfo(f"  TP: {self.tp_pct:.1%} | SL: {self.sl_drop_pct:.1%} | Throttle: {self.throttle_s}s")
+        self._linfo("=" * 65)
 
         if not DRY_RUN:
             self._lwarn("MODO REAL ACTIVADO — las órdenes se ejecutarán en Binance")
