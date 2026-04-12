@@ -468,8 +468,9 @@ class ExecutionBot:
         self.exchange      = _create_exchange()
         self.risk          = RiskGuard(self.exchange, redis_pub=None)  # ISSUE #11: será actualizado después
         self.rate_limiter  = RateLimitHandler()
-        self._redis_pub:  Optional[aioredis.Redis]      = None
-        self._redis_sub:  Optional[aioredis.Redis]      = None
+        self._redis_pub:     Optional[aioredis.Redis]      = None
+        self._redis_sub:     Optional[aioredis.Redis]      = None
+        self._redis_signals: Optional[aioredis.Redis]      = None
         self._start_time  = time.time()
         self._total_fills = 0
         self._total_fails = 0

@@ -115,7 +115,9 @@ class BinanceFuturesExchange:
             else:
                 log.warning("[FUTURES] ⚠️  MAINNET REAL — dinero real en Binance Futures")
 
-            # Cargar mercados y verificar conectividad
+            # Cargar mercados — se deshabilita fetchCurrencies porque sapi
+            # no existe en futures testnet (binanceusdm solo tiene fapi endpoints)
+            client.has["fetchCurrencies"] = False
             client.load_markets()
             log.info(f"[FUTURES] Conectado OK — {len(client.markets)} mercados cargados")
 
