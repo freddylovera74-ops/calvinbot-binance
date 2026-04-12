@@ -436,7 +436,7 @@ class SignalEngine:
                     f"precio={btc_price:.2f} < sl={pos.sl_price:.2f} "
                     f"— Binance debería haber ejecutado orderId={pos.stop_order_id}"
                 )
-                pnl_usd = pos.size_usd * pnl_pct
+                pnl_usd = pos.qty_base * (btc_price - pos.entry_price)
                 await self._close_position_local(pos, btc_price, "SL_BINANCE", pnl_usd)
                 continue
 
@@ -516,10 +516,10 @@ class SignalEngine:
 
         fill_price = float(receipt.get("fill_price", current_price))
         pnl_pct    = (fill_price - pos.entry_price) / pos.entry_price
-        pnl_usd    = pos.size_usd * pnl_pct
+        pnl_usd    = pos.qty_base * (fill_price - pos.entry_price)
 
         if qty_to_sell < pos.qty_base:
-            pnl_usd = (qty_to_sell / pos.qty_base) * pos.size_usd * pnl_pct
+            pnl_usd = qty_to_sell * (fill_price - pos.entry_price)
 
         await self._close_position_local(pos, fill_price, reason, pnl_usd)
 
