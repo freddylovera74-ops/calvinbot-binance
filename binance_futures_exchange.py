@@ -101,16 +101,17 @@ class BinanceFuturesExchange:
 
             if BINANCE_TESTNET:
                 # demo.binance.com / futures testnet comparten el mismo backend:
-                # testnet.binancefuture.com — se fijan las URLs explícitamente
-                # porque set_sandbox_mode() no siempre apunta al endpoint correcto.
+                # testnet.binancefuture.com — se actualizan solo las claves fapi
+                # con .update() para no eliminar el resto del dict de ccxt.
                 FAPI_TESTNET = "https://testnet.binancefuture.com"
-                client.urls["api"] = {
+                client.urls["api"].update({
                     "fapiPublic":    f"{FAPI_TESTNET}/fapi/v1",
                     "fapiPublicV2":  f"{FAPI_TESTNET}/fapi/v2",
                     "fapiPrivate":   f"{FAPI_TESTNET}/fapi/v1",
                     "fapiPrivateV2": f"{FAPI_TESTNET}/fapi/v2",
+                    "fapiPrivateV3": f"{FAPI_TESTNET}/fapi/v3",
                     "fapiData":      f"{FAPI_TESTNET}/futures/data",
-                }
+                })
                 log.info("[FUTURES] Demo/Testnet activo → testnet.binancefuture.com/fapi")
             else:
                 log.warning("[FUTURES] ⚠️  MAINNET REAL — dinero real en Binance Futures")
