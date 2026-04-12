@@ -100,9 +100,18 @@ class BinanceFuturesExchange:
             })
 
             if BINANCE_TESTNET:
-                # Futuros testnet: testnet.binancefuture.com (/fapi endpoints)
-                client.set_sandbox_mode(True)
-                log.info("[FUTURES] Testnet activo — testnet.binancefuture.com/fapi")
+                # demo.binance.com / futures testnet comparten el mismo backend:
+                # testnet.binancefuture.com — se fijan las URLs explícitamente
+                # porque set_sandbox_mode() no siempre apunta al endpoint correcto.
+                FAPI_TESTNET = "https://testnet.binancefuture.com"
+                client.urls["api"] = {
+                    "fapiPublic":    f"{FAPI_TESTNET}/fapi/v1",
+                    "fapiPublicV2":  f"{FAPI_TESTNET}/fapi/v2",
+                    "fapiPrivate":   f"{FAPI_TESTNET}/fapi/v1",
+                    "fapiPrivateV2": f"{FAPI_TESTNET}/fapi/v2",
+                    "fapiData":      f"{FAPI_TESTNET}/futures/data",
+                }
+                log.info("[FUTURES] Demo/Testnet activo → testnet.binancefuture.com/fapi")
             else:
                 log.warning("[FUTURES] ⚠️  MAINNET REAL — dinero real en Binance Futures")
 
