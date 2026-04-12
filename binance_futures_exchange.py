@@ -82,7 +82,7 @@ class BinanceFuturesExchange:
     def initialize(self) -> None:
         """Configura ccxt, establece apalancamiento y tipo de margen."""
         if DRY_RUN:
-            log.info(f"[FUTURES][DRY] DRY RUN — sin conexión real a Binance Futures")
+            log.info("[FUTURES][DRY] DRY RUN — sin conexión real a Binance Futures")
             self._initialized = True
             return
 
@@ -94,47 +94,60 @@ class BinanceFuturesExchange:
                 "secret":  BINANCE_API_SECRET,
                 "options": {
                     "adjustForTimeDifference": True,
-                    "recvWindow": 10000,
+                    "recvWindow":              10000,
+                    "defaultType":             "future",
                 },
             })
 
             if BINANCE_TESTNET:
+                # Futuros testnet: testnet.binancefuture.com (/fapi endpoints)
                 client.set_sandbox_mode(True)
-                log.info("[FUTURES] Modo TESTNET activo — testnet.binancefuture.com")
+                log.info("[FUTURES] Testnet activo — testnet.binancefuture.com/fapi")
             else:
-                log.warning("[FUTURES] Modo REAL — operando en Binance Futures MAINNET")
+                log.warning("[FUTURES] ⚠️  MAINNET REAL — dinero real en Binance Futures")
 
-            # Cargar mercados
+            # Cargar mercados y verificar conectividad
             client.load_markets()
+            log.info(f"[FUTURES] Conectado OK — {len(client.markets)} mercados cargados")
 
-            # Configurar apalancamiento
+            # ── Apalancamiento ─────────────────────────────────────────────────
+            # Usamos set_leverage() de alto nivel (más portátil entre versiones ccxt)
             try:
-                client.fapiPrivate_post_leverage({
-                    "symbol":   self._symbol,
-                    "leverage": self._leverage,
-                })
-                log.info(f"[FUTURES] Leverage configurado: x{self._leverage} en {self._symbol}")
+                client.set_leverage(self._leverage, self._symbol)
+                log.info(f"[FUTURES] Leverage: x{self._leverage} en {self._symbol}")
             except Exception as ex:
-                log.warning(f"[FUTURES] No se pudo configurar leverage ({ex}) — puede que ya esté configurado")
+                ex_str = str(ex).lower()
+                if "no need" in ex_str or "same" in ex_str:
+                    log.info(f"[FUTURES] Leverage ya era x{self._leverage} — OK")
+                else:
+                    log.warning(f"[FUTURES] Leverage warning: {ex}")
 
-            # Configurar tipo de margen
+            # ── Tipo de margen ─────────────────────────────────────────────────
+            # ISOLATED: cada posición tiene su propio margen (más seguro)
+            # CROSS: comparte margen de toda la cuenta (más riesgo de liquidación)
             try:
-                margin_upper = MARGIN_TYPE.upper()
-                client.fapiPrivate_post_margintype({
-                    "symbol":     self._symbol,
-                    "marginType": margin_upper,
-                })
-                log.info(f"[FUTURES] Margin type: {margin_upper}")
+                client.set_margin_mode(MARGIN_TYPE.lower(), self._symbol)
+                log.info(f"[FUTURES] Margin type: {MARGIN_TYPE.upper()}")
             except Exception as ex:
-                # Si ya está en ese modo, Binance devuelve error "No need to change"
-                log.debug(f"[FUTURES] margin type: {ex}")
+                ex_str = str(ex).lower()
+                if "no need" in ex_str or "already" in ex_str or "-4046" in str(ex):
+                    log.info(f"[FUTURES] Margin type ya era {MARGIN_TYPE.upper()} — OK")
+                else:
+                    log.warning(f"[FUTURES] Margin type warning: {ex}")
 
             self._client = client
             self._initialized = True
+
+            # ── Calcular precio de liquidación aproximado ──────────────────────
+            # Con margen aislado x20: liquidación ≈ entrada * (1 - 0.9/leverage)
+            # A $95,000 y x20: liquidación ≈ $95,000 * (1 - 0.045) ≈ $90,725
+            # El SL al 0.8% = $94,240 — se activa ANTES de la liquidación ✓
+            liq_approx_pct = round((1.0 / self._leverage) * 90, 2)  # ≈ 4.5% con x20
             log.info(
-                f"[FUTURES] Inicializado OK | symbol={self._symbol} "
-                f"leverage=x{self._leverage} margin={MARGIN_TYPE} "
-                f"testnet={BINANCE_TESTNET}"
+                f"[FUTURES] Config OK | symbol={self._symbol} "
+                f"leverage=x{self._leverage} margin={MARGIN_TYPE} testnet={BINANCE_TESTNET}\n"
+                f"           Liquidación aprox: -{liq_approx_pct:.1f}% | SL: -{SL_DROP_PCT*100:.1f}% "
+                f"(SL activa ANTES de liquidación ✓)"
             )
 
         except ImportError:
@@ -217,14 +230,21 @@ class BinanceFuturesExchange:
                 )
             )
             latency_ms = (time.time() - t_start) * 1000
-            fill_price = float(order.get("average") or order.get("price") or price)
+
+            # En futuros testnet, 'average' puede ser None si la orden se procesó
+            # instantáneamente — en ese caso usamos 'price' o el precio de referencia
+            fill_price = (
+                float(order.get("average"))    if order.get("average") else
+                float(order.get("price"))      if order.get("price")   else
+                price
+            )
             filled_qty = float(order.get("filled") or qty)
+            order_id   = str(order.get("id", ""))
 
             log.info(
-                f"[FUTURES] BUY FILLED: {filled_qty:.4f} BTC "
-                f"@ ${fill_price:.2f} (margin=${size_usd:.2f} "
-                f"posición=${filled_qty * fill_price:.2f}) "
-                f"lat={latency_ms:.0f}ms"
+                f"[FUTURES] BUY FILLED: {filled_qty:.4f} BTC @ ${fill_price:.2f} | "
+                f"margen=${size_usd:.2f} posición=${filled_qty * fill_price:.2f} "
+                f"(x{self._leverage}) | orderId={order_id[:12]} lat={latency_ms:.0f}ms"
             )
             return filled_qty, fill_price
 
