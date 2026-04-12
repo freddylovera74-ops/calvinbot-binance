@@ -321,9 +321,10 @@ class SignalEngine:
                 self._last_blocked_log = now
                 btc = bp.get_btc_price()
                 mom_pct, mom_dir = bp.get_momentum(window_s=self.btc_window_s)
+                btc_str = f"${btc:.2f}" if btc is not None else "N/A"
                 _log.info(
                     f"[SCAN] sin entrada — {reason} | "
-                    f"BTC=${btc:.2f} mom={mom_pct:+.4f}% dir={mom_dir} "
+                    f"BTC={btc_str} mom={mom_pct:+.4f}% dir={mom_dir} "
                     f"pos={len(self.open_pos)}/{self.max_open_pos} "
                     f"pnl={self.session_pnl:+.2f}$ paused={self.entries_paused}"
                 )
@@ -803,7 +804,8 @@ class SignalEngine:
                 await self._manage_positions()
 
             except Exception as exc:
-                self._lerr(f"[MAIN] Error inesperado: {exc}")
+                import traceback
+                self._lerr(f"[MAIN] Error inesperado: {exc}\n{traceback.format_exc()}")
 
             await asyncio.sleep(SCAN_INTERVAL_S)
 
