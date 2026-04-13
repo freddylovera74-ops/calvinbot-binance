@@ -389,6 +389,7 @@ class CircuitBreaker:
         "fok sin fill", "slippage", "expirada", "skipped",
         "couldn't be fully filled", "not enough balance",
         "invalid param", "sin liquidez", "fill insuficiente",
+        "reduceonly", "-2022",  # posición ya cerrada por SL/TP nativo de Binance
     )
     _CRITICO_PATTERNS = (
         "watchdog_timeout", "redis_latency_critical",
@@ -398,7 +399,7 @@ class CircuitBreaker:
         "timeout", "timed out", "502", "503", "504", "500",
         "connection", "websocket", "network", "read timeout",
         "connect timeout", "ssl", "reset by peer", "connectionerror",
-        "sell fallido definitivo", "remotedisconnected",
+        "remotedisconnected",
     )
 
     def __init__(self):
@@ -1173,15 +1174,16 @@ class ExecutionBot:
                 )
             else:
                 self._total_fails += 1
+                # SELL retornó False: error de conexión o infraestructura — activar CB
                 asyncio.create_task(self._circuit_breaker_protocol(
-                    "sell fallido definitivo",
+                    "connection error en sell order",
                     context=f"SELL pos={signal.position_id[:16]} tokens={signal.size_tokens:.4f}",
                 ))
                 return ExecutionReceipt(
                     signal_id=signal.signal_id, action="SELL",
                     status="FAILED", position_id=signal.position_id,
                     size_usd=signal.size_usd,
-                    error="SELL FALLIDO DEFINITIVO",
+                    error="SELL FAILED — ver logs de exchange",
                 )
 
         except Exception as exc:

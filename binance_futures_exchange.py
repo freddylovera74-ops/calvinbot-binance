@@ -298,6 +298,13 @@ class BinanceFuturesExchange:
             return True
 
         except Exception as exc:
+            exc_str = str(exc)
+            exc_low = exc_str.lower()
+            # Posición ya cerrada por SL/TP nativo de Binance — no es un error real
+            # Binance devuelve -2022 "ReduceOnly Order is rejected" cuando no hay posición abierta
+            if "reduceonly" in exc_low or "-2022" in exc_str or "position side does not match" in exc_low:
+                log.warning(f"[FUTURES] SELL: posición ya cerrada por Binance (SL/TP nativo) — OK: {exc_str[:120]}")
+                return True  # La posición ya no existe = objetivo cumplido
             log.error(f"[FUTURES] SELL error: {exc}")
             return False
 
