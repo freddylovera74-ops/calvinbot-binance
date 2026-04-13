@@ -359,6 +359,142 @@ class BinanceFuturesExchange:
             log.error(f"[FUTURES] Error colocando stop-loss: {exc}")
             return ""
 
+    # ── SHORT (abrir/cerrar posición bajista) ─────────────────────────────────
+
+    async def create_short_order(
+        self,
+        token_id: str,
+        price: float,
+        size_usd: float,
+    ) -> Tuple[float, float]:
+        """Abre posición SHORT por mercado (SELL sin reduceOnly en futuros)."""
+        if DRY_RUN or self._client is None:
+            qty_sim = round((size_usd * self._leverage) / price, 3)
+            log.info(f"[FUTURES][DRY] SHORT simulado: {qty_sim:.4f} BTC @ ~${price:.2f}")
+            return qty_sim, price
+
+        position_value = size_usd * self._leverage
+        qty = self._round_qty(position_value / price)
+
+        if qty < MIN_QTY:
+            log.error(
+                f"[FUTURES] SHORT rechazado: qty={qty:.6f} < mínimo {MIN_QTY} "
+                f"(margin=${size_usd:.2f} leverage=x{self._leverage} price={price:.2f})"
+            )
+            return 0.0, price
+
+        loop = asyncio.get_running_loop()
+        t_start = time.time()
+        try:
+            order = await loop.run_in_executor(
+                None,
+                lambda: self._client.create_market_sell_order(
+                    symbol=token_id,
+                    amount=qty,
+                    params={"positionSide": "BOTH"},  # sin reduceOnly = abrir SHORT
+                )
+            )
+            latency_ms = (time.time() - t_start) * 1000
+            fill_price = (
+                float(order.get("average")) if order.get("average") else
+                float(order.get("price"))   if order.get("price")   else
+                price
+            )
+            filled_qty = float(order.get("filled") or qty)
+            order_id   = str(order.get("id", ""))
+            log.info(
+                f"[FUTURES] SHORT FILLED: {filled_qty:.4f} BTC @ ${fill_price:.2f} | "
+                f"margen=${size_usd:.2f} posición=${filled_qty * fill_price:.2f} "
+                f"(x{self._leverage}) | orderId={order_id[:12]} lat={latency_ms:.0f}ms"
+            )
+            return filled_qty, fill_price
+
+        except Exception as exc:
+            log.error(f"[FUTURES] SHORT error: {exc}")
+            return 0.0, price
+
+    async def close_short_order(
+        self,
+        token_id: str,
+        price: float,
+        size_tokens: float,
+        **kwargs,
+    ) -> bool:
+        """Cierra posición SHORT por mercado (BUY con reduceOnly)."""
+        if DRY_RUN or self._client is None:
+            log.info(f"[FUTURES][DRY] CLOSE SHORT simulado: {size_tokens:.4f} BTC @ ~${price:.2f}")
+            return True
+
+        qty = self._round_qty(size_tokens)
+        if qty <= 0:
+            log.error(f"[FUTURES] CLOSE SHORT rechazado: qty={qty}")
+            return False
+
+        loop = asyncio.get_running_loop()
+        try:
+            order = await loop.run_in_executor(
+                None,
+                lambda: self._client.create_market_buy_order(
+                    symbol=token_id,
+                    amount=qty,
+                    params={"reduceOnly": True, "positionSide": "BOTH"},
+                )
+            )
+            fill_price = float(order.get("average") or order.get("price") or price)
+            log.info(f"[FUTURES] CLOSE SHORT FILLED: {qty:.4f} BTC @ ${fill_price:.2f}")
+            return True
+
+        except Exception as exc:
+            exc_str = str(exc)
+            exc_low = exc_str.lower()
+            if "reduceonly" in exc_low or "-2022" in exc_str or "position side does not match" in exc_low:
+                log.warning(f"[FUTURES] CLOSE SHORT: posición ya cerrada por Binance — OK: {exc_str[:120]}")
+                return True
+            log.error(f"[FUTURES] CLOSE SHORT error: {exc}")
+            return False
+
+    def compute_stop_prices_short(self, fill_price: float) -> Tuple[float, float]:
+        """Calcula el stop para SHORT: precio SUBE = pérdida."""
+        stop_price = round(fill_price * (1.0 + SL_DROP_PCT), 2)
+        return stop_price, stop_price
+
+    async def place_stop_loss_short(
+        self,
+        symbol:      str,
+        qty:         float,
+        stop_price:  float,
+        limit_price: float,
+    ) -> str:
+        """Coloca STOP_MARKET BUY para proteger posición SHORT."""
+        if DRY_RUN or self._client is None:
+            log.info(f"[FUTURES][DRY] Stop-loss SHORT simulado @ ${stop_price:.2f}")
+            return "DRY_STOP_ORDER"
+
+        loop = asyncio.get_running_loop()
+        try:
+            order = await loop.run_in_executor(
+                None,
+                lambda: self._client.create_order(
+                    symbol=symbol,
+                    type="STOP_MARKET",
+                    side="buy",
+                    amount=self._round_qty(qty),
+                    params={
+                        "stopPrice":    stop_price,
+                        "reduceOnly":   True,
+                        "positionSide": "BOTH",
+                        "workingType":  "CONTRACT_PRICE",
+                    },
+                )
+            )
+            order_id = str(order["id"])
+            log.info(f"[FUTURES] Stop-loss SHORT colocado: id={order_id} stop=${stop_price:.2f}")
+            return order_id
+
+        except Exception as exc:
+            log.error(f"[FUTURES] Error colocando stop-loss SHORT: {exc}")
+            return ""
+
     # ── Cancelación de órdenes ─────────────────────────────────────────────────
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

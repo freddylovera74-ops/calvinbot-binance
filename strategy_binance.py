@@ -304,10 +304,12 @@ class SignalEngine:
         if direction is None or abs(mom_pct) < self.btc_min_pct:
             return False, "", f"momentum insuficiente ({mom_pct:+.3f}% < {self.btc_min_pct:.3f}%)"
 
-        if direction != "UP":
-            return False, "", f"momentum DOWN={mom_pct:.3f}% — spot solo opera LONG"
+        if direction == "UP":
+            return True, "LONG", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
+        elif direction == "DOWN":
+            return True, "SHORT", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
 
-        return True, direction, f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
+        return False, "", "sin dirección clara"
 
     # ── Apertura de posición ──────────────────────────────────────────────────
 
@@ -339,7 +341,7 @@ class SignalEngine:
         signal = {
             "action":      "BUY",
             "signal_id":   str(uuid.uuid4()),
-            "side":        "LONG",
+            "side":        direction,   # "LONG" o "SHORT"
             "token_id":    SYMBOL,
             "price":       btc_price,
             "size_usd":    self.stake_usd,
@@ -348,7 +350,7 @@ class SignalEngine:
         }
 
         self._linfo(
-            f"[ENTRY] LONG {SYMBOL} | precio={btc_price:.2f} "
+            f"[ENTRY] {direction} {SYMBOL} | precio={btc_price:.2f} "
             f"stake=${self.stake_usd:.2f} | {reason}"
         )
         self.last_entry_ts = time.time()
@@ -373,13 +375,17 @@ class SignalEngine:
         if slip_pct > SLIP_MAX_PCT:
             self._lwarn(f"[ENTRY] Slippage alto: {slip_pct:.3%} (señal={btc_price:.2f} fill={fill_price:.2f})")
 
-        tp_price = fill_price * (1 + self.tp_pct)
-        sl_price = fill_price * (1 - self.sl_drop_pct)
+        if direction == "SHORT":
+            tp_price = fill_price * (1 - self.tp_pct)       # TP: precio baja
+            sl_price = fill_price * (1 + self.sl_drop_pct)  # SL: precio sube
+        else:
+            tp_price = fill_price * (1 + self.tp_pct)
+            sl_price = fill_price * (1 - self.sl_drop_pct)
 
         pos = Position(
             position_id   = pos_id,
             symbol        = SYMBOL,
-            side          = "LONG",
+            side          = direction,
             entry_price   = fill_price,
             size_usd      = self.stake_usd,
             qty_base      = qty_btc,
@@ -427,23 +433,33 @@ class SignalEngine:
                 continue
 
             holding_s = now - pos.opened_at
-            pnl_pct   = (btc_price - pos.entry_price) / pos.entry_price
+            is_short  = pos.side == "SHORT"
+
+            # PnL directo según dirección
+            if is_short:
+                pnl_pct = (pos.entry_price - btc_price) / pos.entry_price
+                sl_hit  = btc_price > pos.sl_price   # precio sube = pérdida en SHORT
+            else:
+                pnl_pct = (btc_price - pos.entry_price) / pos.entry_price
+                sl_hit  = btc_price < pos.sl_price   # precio baja = pérdida en LONG
 
             # ── Verificar si SL fue disparado por Binance ────────────────────
-            if btc_price < pos.sl_price and pos.stop_order_id:
+            if sl_hit and pos.stop_order_id:
+                sl_dir = ">" if is_short else "<"
                 self._lwarn(
-                    f"[MANAGE] SL detectado en pos {pos.position_id}: "
-                    f"precio={btc_price:.2f} < sl={pos.sl_price:.2f} "
+                    f"[MANAGE] SL detectado en pos {pos.position_id} ({pos.side}): "
+                    f"precio={btc_price:.2f} {sl_dir} sl={pos.sl_price:.2f} "
                     f"— Binance debería haber ejecutado orderId={pos.stop_order_id}"
                 )
-                pnl_usd = pos.qty_base * (btc_price - pos.entry_price)
+                pnl_usd = pos.qty_base * (pos.entry_price - btc_price) if is_short \
+                          else pos.qty_base * (btc_price - pos.entry_price)
                 await self._close_position_local(pos, btc_price, "SL_BINANCE", pnl_usd)
                 continue
 
             # ── Take Profit parcial ──────────────────────────────────────────
             if not pos.partial_tp_done and pnl_pct >= self.tp_partial_pct:
                 self._linfo(
-                    f"[TP PARCIAL] pos={pos.position_id} precio={btc_price:.2f} "
+                    f"[TP PARCIAL] pos={pos.position_id} ({pos.side}) precio={btc_price:.2f} "
                     f"pnl={pnl_pct:.3%} >= {self.tp_partial_pct:.3%} — vendiendo 50%"
                 )
                 qty_sell = pos.qty_base * 0.5
@@ -455,7 +471,7 @@ class SignalEngine:
             # ── Take Profit completo ─────────────────────────────────────────
             if pnl_pct >= self.tp_pct:
                 self._linfo(
-                    f"[TP FULL] pos={pos.position_id} precio={btc_price:.2f} "
+                    f"[TP FULL] pos={pos.position_id} ({pos.side}) precio={btc_price:.2f} "
                     f"pnl={pnl_pct:.3%} >= {self.tp_pct:.3%}"
                 )
                 await self._execute_sell(pos, btc_price, pos.qty_base, "TP_FULL")
@@ -464,7 +480,7 @@ class SignalEngine:
             # ── Cierre por tiempo máximo ─────────────────────────────────────
             if holding_s >= self.max_hold_s:
                 self._lwarn(
-                    f"[TIME EXIT] pos={pos.position_id} holding={holding_s:.0f}s >= {self.max_hold_s}s "
+                    f"[TIME EXIT] pos={pos.position_id} ({pos.side}) holding={holding_s:.0f}s >= {self.max_hold_s}s "
                     f"precio={btc_price:.2f} pnl={pnl_pct:.3%} — cerrando a mercado"
                 )
                 await self._execute_sell(pos, btc_price, pos.qty_base, "TIME_EXIT")
@@ -473,7 +489,7 @@ class SignalEngine:
             # ── Log periódico ────────────────────────────────────────────────
             if int(holding_s) % 30 == 0 and holding_s > 0:
                 self._linfo(
-                    f"[POS] {pos.position_id[:8]} holding={holding_s:.0f}s "
+                    f"[POS] {pos.position_id[:8]} ({pos.side}) holding={holding_s:.0f}s "
                     f"precio={btc_price:.2f} pnl={pnl_pct:+.3%} "
                     f"TP={pos.tp_price:.2f} SL={pos.sl_price:.2f}"
                 )
@@ -491,7 +507,7 @@ class SignalEngine:
         signal = {
             "action":        "SELL",
             "signal_id":     str(uuid.uuid4()),
-            "side":          "LONG",
+            "side":          pos.side,    # "LONG" o "SHORT"
             "token_id":      pos.symbol,
             "price":         current_price,
             "size_usd":      pos.size_usd,
@@ -515,11 +531,12 @@ class SignalEngine:
             return
 
         fill_price = float(receipt.get("fill_price", current_price))
-        pnl_pct    = (fill_price - pos.entry_price) / pos.entry_price
-        pnl_usd    = pos.qty_base * (fill_price - pos.entry_price)
-
-        if qty_to_sell < pos.qty_base:
-            pnl_usd = qty_to_sell * (fill_price - pos.entry_price)
+        # PnL directo según dirección de la posición
+        qty_ref = qty_to_sell if qty_to_sell < pos.qty_base else pos.qty_base
+        if pos.side == "SHORT":
+            pnl_usd = qty_ref * (pos.entry_price - fill_price)
+        else:
+            pnl_usd = qty_ref * (fill_price - pos.entry_price)
 
         await self._close_position_local(pos, fill_price, reason, pnl_usd)
 
@@ -537,10 +554,13 @@ class SignalEngine:
         self.session_pnl += pnl_usd
         loss_tracker.record_pnl(pnl_usd)
 
-        pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
+        if pos.side == "SHORT":
+            pnl_pct = (pos.entry_price - exit_price) / pos.entry_price
+        else:
+            pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
 
         self._linfo(
-            f"[CLOSE] {pos.position_id[:8]} reason={reason} "
+            f"[CLOSE] {pos.position_id[:8]} ({pos.side}) reason={reason} "
             f"entry={pos.entry_price:.2f} exit={exit_price:.2f} "
             f"pnl={pnl_pct:+.3%} ({pnl_usd:+.2f}$) "
             f"session={self.session_pnl:+.2f}$"
@@ -551,7 +571,7 @@ class SignalEngine:
 
         mode   = "DRY" if DRY_RUN else "REAL"
         result = "WIN" if pnl_usd >= 0 else "LOSS"
-        metrics.inc_trade(mode=mode, side="LONG", result=result)
+        metrics.inc_trade(mode=mode, side=pos.side, result=result)
         metrics.set_pnl(mode=mode, value=self.session_pnl)
         metrics.set_open_positions(len(self.open_pos))
 

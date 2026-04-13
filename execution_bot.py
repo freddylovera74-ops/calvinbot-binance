@@ -1026,11 +1026,18 @@ class ExecutionBot:
         # Ejecución con manejo de rate limit
         for retry in range(3):
             try:
-                tokens, fill_price = await self.exchange.create_buy_order(
-                    token_id=signal.token_id,
-                    price=signal.price,
-                    size_usd=signal.size_usd,
-                )
+                if signal.side == "SHORT" and hasattr(self.exchange, "create_short_order"):
+                    tokens, fill_price = await self.exchange.create_short_order(
+                        token_id=signal.token_id,
+                        price=signal.price,
+                        size_usd=signal.size_usd,
+                    )
+                else:
+                    tokens, fill_price = await self.exchange.create_buy_order(
+                        token_id=signal.token_id,
+                        price=signal.price,
+                        size_usd=signal.size_usd,
+                    )
                 latency_ms = (time.time() - t_start) * 1000
 
                 if tokens <= 0:
@@ -1064,13 +1071,22 @@ class ExecutionBot:
                 stop_order_id = ""
                 if hasattr(self.exchange, "place_stop_loss"):
                     try:
-                        stop_p, limit_p = self.exchange.compute_stop_prices(fill_price)
-                        stop_order_id   = await self.exchange.place_stop_loss(
-                            symbol      = signal.token_id,
-                            qty         = tokens,
-                            stop_price  = stop_p,
-                            limit_price = limit_p,
-                        )
+                        if signal.side == "SHORT" and hasattr(self.exchange, "place_stop_loss_short"):
+                            stop_p, limit_p = self.exchange.compute_stop_prices_short(fill_price)
+                            stop_order_id   = await self.exchange.place_stop_loss_short(
+                                symbol      = signal.token_id,
+                                qty         = tokens,
+                                stop_price  = stop_p,
+                                limit_price = limit_p,
+                            )
+                        else:
+                            stop_p, limit_p = self.exchange.compute_stop_prices(fill_price)
+                            stop_order_id   = await self.exchange.place_stop_loss(
+                                symbol      = signal.token_id,
+                                qty         = tokens,
+                                stop_price  = stop_p,
+                                limit_price = limit_p,
+                            )
                         if stop_order_id:
                             log.info(
                                 f"[EXEC] Stop-loss nativo colocado: "
@@ -1150,14 +1166,21 @@ class ExecutionBot:
                 log.warning(f"[EXEC] Error cancelando stop pre-SELL: {cancel_exc}")
 
         try:
-            sold = await self.exchange.create_sell_order(
-                token_id=signal.token_id,
-                price=signal.price,
-                size_tokens=signal.size_tokens,
-                current_prices=self._last_prices,
-                side_key=signal.side,
-                entry_price=signal.entry_price,
-            )
+            if signal.side == "SHORT" and hasattr(self.exchange, "close_short_order"):
+                sold = await self.exchange.close_short_order(
+                    token_id=signal.token_id,
+                    price=signal.price,
+                    size_tokens=signal.size_tokens,
+                )
+            else:
+                sold = await self.exchange.create_sell_order(
+                    token_id=signal.token_id,
+                    price=signal.price,
+                    size_tokens=signal.size_tokens,
+                    current_prices=self._last_prices,
+                    side_key=signal.side,
+                    entry_price=signal.entry_price,
+                )
             latency_ms = (time.time() - t_start) * 1000
 
             if sold:
