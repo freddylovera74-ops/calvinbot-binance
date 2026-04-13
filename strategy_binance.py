@@ -655,52 +655,100 @@ class SignalEngine:
 
     async def _reconcile_positions_at_startup(self) -> None:
         """
-        Cruza posiciones en memoria contra Binance real al arrancar.
-        Elimina posiciones cuyo stop-loss ya fue ejecutado mientras el bot estaba caído.
-        Solo actúa en modo REAL — en DRY_RUN no hay órdenes reales que verificar.
+        Reconcilia el estado local contra Binance real al arrancar:
+        1. Lee todas las posiciones reales de Binance.
+        2. Elimina del tracker las que Binance ya cerró (SL offline).
+        3. Sincroniza qty_base y entry_price con los valores reales de Binance.
+        4. Detecta y alerta sobre posiciones en Binance no rastreadas localmente.
+        Solo actúa en modo REAL — en DRY_RUN no hay órdenes reales.
         """
-        if DRY_RUN or not self.open_pos:
+        if DRY_RUN:
             return
 
-        self._linfo(f"[RECONCILE] Verificando {len(self.open_pos)} posiciones contra Binance...")
+        self._linfo("[RECONCILE] Leyendo posiciones reales de Binance...")
 
         try:
-            exchange = BinanceSpotExchange()
+            # Usar el exchange correcto según EXCHANGE_TYPE
+            _exchange_type = os.getenv("EXCHANGE_TYPE", "spot").lower()
+            if _exchange_type == "futures":
+                from binance_futures_exchange import BinanceFuturesExchange
+                exchange = BinanceFuturesExchange()
+            else:
+                exchange = BinanceSpotExchange()
             exchange.initialize()
             await exchange._async_init()
 
-            tracked = {
-                p.position_id: {
-                    "token_id":      p.symbol,
-                    "stop_order_id": p.stop_order_id,
-                    "entry_price":   p.entry_price,
-                    "qty_base":      p.qty_base,
-                    "size_usd":      p.size_usd,
-                }
-                for p in self.open_pos
-            }
+            # Leer posiciones REALES de Binance (fuente de verdad)
+            real_positions = await exchange.fetch_real_positions()
+            real_by_side   = {rp["side"]: rp for rp in real_positions}  # "LONG" | "SHORT"
 
-            active_dict = await exchange.reconcile_open_positions(tracked)
-            active_ids  = set(active_dict.keys())
-            closed_pos  = [p for p in self.open_pos if p.position_id not in active_ids]
-            self.open_pos = [p for p in self.open_pos if p.position_id in active_ids]
-
-            if closed_pos:
-                self._lwarn(
-                    f"[RECONCILE] {len(closed_pos)} posiciones eliminadas "
-                    f"(SL ejecutado por Binance mientras el bot estaba caído): "
-                    + ", ".join(p.position_id[:8] for p in closed_pos)
-                )
-                for p in closed_pos:
-                    pnl_approx = (p.sl_price - p.entry_price) * p.qty_base
-                    self._log_trade_csv("CLOSE", p, p.sl_price, pnl_approx, "SL_BINANCE_OFFLINE")
-                    self.session_pnl += pnl_approx
-
-                self._save_open_positions()
-
+            # ── PASO 1: Reconciliar posiciones rastreadas en disco ────────────
             if self.open_pos:
-                self._linfo(f"[RECONCILE] {len(self.open_pos)} posiciones confirmadas activas en Binance")
-            else:
+                self._linfo(
+                    f"[RECONCILE] Verificando {len(self.open_pos)} posiciones locales "
+                    f"contra {len(real_positions)} posiciones reales en Binance..."
+                )
+                surviving = []
+                for p in self.open_pos:
+                    real = real_by_side.get(p.side)
+                    if real is None:
+                        # Binance ya no tiene esta posición → fue cerrada por SL offline
+                        pnl_approx = (p.sl_price - p.entry_price) * p.qty_base
+                        self._lwarn(
+                            f"[RECONCILE] pos {p.position_id[:8]} ({p.side}) "
+                            f"cerrada por Binance offline — pnl≈{pnl_approx:+.2f}$"
+                        )
+                        self._log_trade_csv("CLOSE", p, p.sl_price, pnl_approx, "SL_BINANCE_OFFLINE")
+                        self.session_pnl += pnl_approx
+                    else:
+                        # Posición activa: sincronizar qty y entry con valores reales
+                        old_qty   = p.qty_base
+                        old_entry = p.entry_price
+                        p.qty_base    = real["qty"]
+                        p.entry_price = real["entry_price"]
+                        if abs(old_qty - real["qty"]) > 0.0001 or abs(old_entry - real["entry_price"]) > 0.5:
+                            self._lwarn(
+                                f"[RECONCILE] Sincronizado {p.position_id[:8]} ({p.side}): "
+                                f"qty {old_qty:.6f}→{real['qty']:.6f} BTC | "
+                                f"entry {old_entry:.2f}→{real['entry_price']:.2f}"
+                            )
+                        else:
+                            self._linfo(
+                                f"[RECONCILE] pos {p.position_id[:8]} ({p.side}) "
+                                f"OK — {real['qty']:.6f} BTC @ {real['entry_price']:.2f}"
+                            )
+                        surviving.append(p)
+
+                changed = len(self.open_pos) != len(surviving)
+                self.open_pos = surviving
+                if changed:
+                    self._save_open_positions()
+
+                if self.open_pos:
+                    self._linfo(f"[RECONCILE] {len(self.open_pos)} posiciones activas sincronizadas con Binance")
+                else:
+                    self._linfo("[RECONCILE] Sin posiciones activas tras reconciliación — arrancando limpio")
+
+            # ── PASO 2: Detectar posiciones en Binance no rastreadas localmente ─
+            tracked_sides = {p.side for p in self.open_pos}
+            for rp in real_positions:
+                if rp["side"] not in tracked_sides:
+                    msg = (
+                        f"[RECONCILE] ⚠️  POSICIÓN NO RASTREADA en Binance: "
+                        f"{rp['side']} {rp['qty']:.6f} BTC @ {rp['entry_price']:.2f} "
+                        f"PnL={rp['unrealized_pnl']:+.2f} USDT | margin={rp['margin']:.2f} USDT"
+                    )
+                    self._lwarn(msg)
+                    await send_telegram_async(
+                        f"⚠️ Posición NO rastreada en Binance al arrancar\n"
+                        f"Side: {rp['side']} | {rp['qty']:.6f} BTC @ ${rp['entry_price']:.2f}\n"
+                        f"PnL: {rp['unrealized_pnl']:+.2f} USDT | Margen: {rp['margin']:.2f} USDT\n"
+                        f"Cierra manualmente en Binance antes de operar",
+                        level="WARNING",
+                        prefix_label="CalvinBTC · Signal",
+                    )
+
+            if not real_positions and not self.open_pos:
                 self._linfo("[RECONCILE] Sin posiciones activas — arrancando limpio")
 
         except Exception as exc:
