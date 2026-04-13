@@ -435,9 +435,10 @@ _HTML = r"""<!DOCTYPE html>
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 14px 16px;
   }
-  .kpi-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
-  .kpi-value { font-size: 22px; font-weight: 700; line-height: 1; }
-  .kpi-sub   { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .kpi-label   { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+  .kpi-value   { font-size: 22px; font-weight: 700; line-height: 1; }
+  .kpi-sub     { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .kpi-explain { color: var(--muted); font-size: 10px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); opacity: 0.75; line-height: 1.4; }
   .pos { color: var(--green); }
   .neg { color: var(--red); }
   .neu { color: var(--text); }
@@ -524,51 +525,70 @@ _HTML = r"""<!DOCTYPE html>
 <main>
   <!-- KPI row -->
   <div class="kpi-row">
-    <div class="kpi">
-      <div class="kpi-label">BTC Price</div>
+
+    <div class="kpi" title="Precio actual de Bitcoin en dólares. El bot compra y vende BTC automáticamente.">
+      <div class="kpi-label">Precio BTC</div>
       <div class="kpi-value neu" id="kpi-btc">—</div>
       <div class="kpi-sub" id="kpi-mom">mom: —</div>
+      <div class="kpi-explain">Precio en tiempo real · mom = velocidad de subida/bajada</div>
     </div>
-    <div class="kpi">
-      <div class="kpi-label">Session PnL</div>
+
+    <div class="kpi" title="Ganancia o pérdida desde que el bot arrancó hoy. Verde = ganando, Rojo = perdiendo.">
+      <div class="kpi-label">PnL de Hoy</div>
       <div class="kpi-value" id="kpi-pnl">—</div>
       <div class="kpi-sub" id="kpi-drawdown">drawdown: —</div>
+      <div class="kpi-explain">Lo ganado/perdido hoy · drawdown = mayor racha de pérdidas</div>
     </div>
-    <div class="kpi">
-      <div class="kpi-label">PnL Global</div>
+
+    <div class="kpi" title="Suma de todas las ganancias y pérdidas desde el primer día. Es el resultado real total del bot.">
+      <div class="kpi-label">PnL Total (siempre)</div>
       <div class="kpi-value" id="kpi-global-pnl">—</div>
       <div class="kpi-sub" id="kpi-global-trades">todos los trades</div>
+      <div class="kpi-explain">Resultado acumulado histórico · verde = bot rentable</div>
     </div>
-    <div class="kpi">
-      <div class="kpi-label">Win Rate</div>
+
+    <div class="kpi" title="De cada 100 operaciones, cuántas terminaron ganando. Por encima del 60% es bueno. Por encima del 70% es excelente.">
+      <div class="kpi-label">% Aciertos</div>
       <div class="kpi-value neu" id="kpi-wr">—</div>
       <div class="kpi-sub" id="kpi-trades">0 trades</div>
+      <div class="kpi-explain">% de operaciones ganadoras · +60% es bueno, +70% excelente</div>
     </div>
-    <div class="kpi">
-      <div class="kpi-label">Avg Win / Loss</div>
+
+    <div class="kpi" title="Cuánto gana el bot cuando acierta vs cuánto pierde cuando falla. R:R = ratio riesgo/beneficio. Con R:R 0.6 necesitas ganar el 62% de las veces para ser rentable.">
+      <div class="kpi-label">Ganancia / Pérdida media</div>
       <div class="kpi-value neu" id="kpi-avgwl">—</div>
       <div class="kpi-sub" id="kpi-rr">R:R —</div>
+      <div class="kpi-explain">Promedio por operación · R:R = cuánto ganas por cada $ que arriesgas</div>
     </div>
-    <div class="kpi">
-      <div class="kpi-label">Open Positions</div>
+
+    <div class="kpi" title="Operaciones abiertas ahora mismo. El bot tiene dinero en juego esperando a que el precio llegue al objetivo.">
+      <div class="kpi-label">Posiciones Abiertas</div>
       <div class="kpi-value neu" id="kpi-openpos">0</div>
       <div class="kpi-sub" id="kpi-unrealized">unrealized: —</div>
+      <div class="kpi-explain">Operaciones en curso · unrealized = ganancia/pérdida aún no cerrada</div>
     </div>
-    <div class="kpi">
-      <div class="kpi-label">Saldo USDT</div>
+
+    <div class="kpi" title="Tu saldo disponible en Binance. El bot usa una parte fija (stake) en cada operación.">
+      <div class="kpi-label">Saldo en Binance</div>
       <div class="kpi-value neu" id="kpi-balance">—</div>
       <div class="kpi-sub" id="kpi-stake">stake: —</div>
+      <div class="kpi-explain">Dinero disponible · stake = monto usado por operación</div>
     </div>
-    <div class="kpi">
+
+    <div class="kpi" title="Límite de pérdida semanal. Si el bot pierde más de este monto en 7 días, se detiene automáticamente para proteger el capital.">
       <div class="kpi-label">Límite Semanal</div>
       <div class="kpi-value neu" id="kpi-weekly">—</div>
       <div class="kpi-sub" id="kpi-weekly-sub">— / —</div>
+      <div class="kpi-explain">Freno de seguridad semanal · se detiene si supera el límite</div>
     </div>
-    <div class="kpi">
+
+    <div class="kpi" title="Límite de pérdida mensual. Protección a largo plazo para no perder más de un monto fijo en 30 días.">
       <div class="kpi-label">Límite Mensual</div>
       <div class="kpi-value neu" id="kpi-monthly">—</div>
       <div class="kpi-sub" id="kpi-monthly-sub">— / —</div>
+      <div class="kpi-explain">Freno de seguridad mensual · protección del capital a largo plazo</div>
     </div>
+
   </div>
 
   <!-- Bot status -->

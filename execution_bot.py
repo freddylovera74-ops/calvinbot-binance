@@ -148,7 +148,7 @@ def _validate_env_vars() -> None:
 
 # ── Guardrails de riesgo local (Fat-Finger Protection) ───────────────────────
 MAX_ORDER_VALUE_USD  = float(os.getenv("MAX_ORDER_VALUE_USD", "200.0"))  # orden máxima en $
-MAX_DAILY_TRADES     = int(os.getenv("MAX_DAILY_TRADES", "200"))          # órdenes máximas por día
+MAX_DAILY_TRADES     = int(os.getenv("MAX_DAILY_TRADES", "20000"))         # órdenes máximas por día
 SLIP_MAX_PCT         = float(os.getenv("SLIP_MAX_PCT", "0.04"))           # slippage máx aceptado
 MICRO_TEST           = False                                               # modo micro-test deshabilitado
 
