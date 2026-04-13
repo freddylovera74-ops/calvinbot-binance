@@ -500,14 +500,21 @@ class SignalEngine:
 
             # ── Take Profit parcial ──────────────────────────────────────────
             if not pos.partial_tp_done and pnl_pct >= self.tp_partial_pct:
+                qty_sell = round(pos.qty_base * 0.5, 6)
                 self._linfo(
                     f"[TP PARCIAL] pos={pos.position_id} ({pos.side}) precio={btc_price:.2f} "
-                    f"pnl={pnl_pct:.3%} >= {self.tp_partial_pct:.3%} — vendiendo 50%"
+                    f"pnl={pnl_pct:.3%} >= {self.tp_partial_pct:.3%} "
+                    f"— vendiendo 50% ({qty_sell:.6f} BTC), manteniendo {qty_sell:.6f} BTC"
                 )
-                qty_sell = pos.qty_base * 0.5
-                await self._execute_sell(pos, btc_price, qty_sell, "TP_PARTIAL")
-                pos.partial_tp_done = True
-                pos.qty_base       -= qty_sell
+                # Reducir qty ANTES de llamar execute_sell para que el log y
+                # el tracker reflejen la qty correcta al terminar
+                pos.qty_base        -= qty_sell
+                pos.partial_tp_done  = True
+                pos.status           = "open"  # mantener activa
+                await self._execute_sell(pos, btc_price, qty_sell, "TP_PARTIAL",
+                                         partial_close=True)
+                # pos sigue en open_pos con qty_base reducida y sin stop nativo
+                # (cancelado por executor) — el SL local la protege hasta cierre
                 continue
 
             # ── Take Profit completo ─────────────────────────────────────────
@@ -542,8 +549,13 @@ class SignalEngine:
         current_price: float,
         qty_to_sell: float,
         reason: str,
+        partial_close: bool = False,
     ) -> None:
-        """Envía señal SELL al execution_bot y procesa el resultado."""
+        """
+        Envía señal SELL al execution_bot y procesa el resultado.
+        partial_close=True → vende qty_to_sell pero mantiene la posición en el tracker
+        con la qty restante (TP_PARTIAL). Evita acumulación en Binance.
+        """
         pos.status = "closing"
 
         signal = {
@@ -580,7 +592,8 @@ class SignalEngine:
         else:
             pnl_usd = qty_ref * (fill_price - pos.entry_price)
 
-        await self._close_position_local(pos, fill_price, reason, pnl_usd)
+        await self._close_position_local(pos, fill_price, reason, pnl_usd,
+                                         partial_close=partial_close)
 
     async def _close_position_local(
         self,
@@ -588,9 +601,14 @@ class SignalEngine:
         exit_price: float,
         reason: str,
         pnl_usd: float,
+        partial_close: bool = False,
     ) -> None:
-        """Actualiza el tracker local tras el cierre de una posición."""
-        if pos in self.open_pos:
+        """
+        Actualiza el tracker local tras el cierre de una posición.
+        partial_close=True → registra el PnL parcial pero mantiene la posición
+        en open_pos con la qty ya reducida por _manage_positions.
+        """
+        if not partial_close and pos in self.open_pos:
             self.open_pos.remove(pos)
 
         self.session_pnl += pnl_usd
@@ -602,11 +620,13 @@ class SignalEngine:
         else:
             pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
 
+        tag = "PARTIAL" if partial_close else "CLOSE"
         self._linfo(
-            f"[CLOSE] {pos.position_id[:8]} ({pos.side}) reason={reason} "
+            f"[{tag}] {pos.position_id[:8]} ({pos.side}) reason={reason} "
             f"entry={pos.entry_price:.2f} exit={exit_price:.2f} "
             f"pnl={pnl_pct:+.3%} ({pnl_usd:+.2f}$) "
             f"session={self.session_pnl:+.2f}$"
+            + (f" — restante={pos.qty_base:.6f} BTC abierto" if partial_close else "")
         )
 
         self._log_trade_csv("CLOSE", pos, exit_price, pnl_usd, reason)
@@ -957,7 +977,18 @@ class SignalEngine:
                     if from_id != chat_id:
                         continue  # solo acepta tu chat_id
 
-                    if msg_text == "/resume" and self._drawdown_paused:
+                    if msg_text == "/pause":
+                        self._drawdown_paused = True
+                        self.entries_paused   = True
+                        self._linfo("[TELEGRAM] /pause recibido — entradas PAUSADAS manualmente")
+                        await send_telegram_async(
+                            "⏸️ Bot PAUSADO por /pause\n"
+                            "No se abrirán nuevas entradas.\n"
+                            "Envía /resume para reanudar.",
+                            level="WARNING",
+                            prefix_label="CalvinBTC · Telegram",
+                        )
+                    elif msg_text == "/resume":
                         self._drawdown_paused = False
                         self.entries_paused   = False
                         self._linfo("[TELEGRAM] /resume recibido — entradas reanudadas")
