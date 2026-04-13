@@ -307,6 +307,10 @@ class SignalEngine:
         if direction == "UP":
             return True, "LONG", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
         elif direction == "DOWN":
+            # SHORT requiere momentum más fuerte (3x) para evitar falsas señales
+            short_min_pct = self.btc_min_pct * 3
+            if abs(mom_pct) < short_min_pct:
+                return False, "", f"SHORT: momentum insuficiente ({mom_pct:+.3f}% < -{short_min_pct:.3f}%)"
             return True, "SHORT", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
 
         return False, "", "sin dirección clara"

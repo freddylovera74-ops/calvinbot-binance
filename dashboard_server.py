@@ -239,6 +239,7 @@ async def collect_state() -> dict:
 
         # PnL
         "session_pnl":  session_pnl,
+        "global_pnl":   round(pnl_curve[-1]["v"], 4) if pnl_curve else 0.0,
         "pnl_history":  list(_pnl_history),
         "pnl_curve":    pnl_curve[-200:],
 
@@ -534,6 +535,11 @@ _HTML = r"""<!DOCTYPE html>
       <div class="kpi-sub" id="kpi-drawdown">drawdown: —</div>
     </div>
     <div class="kpi">
+      <div class="kpi-label">PnL Global</div>
+      <div class="kpi-value" id="kpi-global-pnl">—</div>
+      <div class="kpi-sub" id="kpi-global-trades">todos los trades</div>
+    </div>
+    <div class="kpi">
       <div class="kpi-label">Win Rate</div>
       <div class="kpi-value neu" id="kpi-wr">—</div>
       <div class="kpi-sub" id="kpi-trades">0 trades</div>
@@ -719,6 +725,11 @@ function applyState(s) {
   $('kpi-pnl').textContent  = fmtP(spnl) + ' USDT';
   $('kpi-pnl').className    = 'kpi-value ' + colorClass(spnl);
   $('kpi-drawdown').textContent = 'drawdown: ' + fmt(s.stats?.drawdown ?? 0) + ' USDT';
+
+  const gpnl = s.global_pnl ?? 0;
+  $('kpi-global-pnl').textContent = fmtP(gpnl) + ' USDT';
+  $('kpi-global-pnl').className   = 'kpi-value ' + colorClass(gpnl);
+  $('kpi-global-trades').textContent = (s.stats?.total ?? 0) + ' trades históricos';
 
   const st = s.stats || {};
   $('kpi-wr').textContent    = st.win_rate != null ? st.win_rate + '%' : '—';
