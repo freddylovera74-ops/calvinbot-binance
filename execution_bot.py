@@ -1568,6 +1568,17 @@ class ExecutionBot:
             log.info("[INIT] Cargando exchangeInfo de Binance (filtros de símbolo)...")
             await self.exchange._async_init()
 
+        # Cancelar órdenes stop huérfanas de sesiones anteriores
+        if not DRY_RUN and hasattr(self.exchange, "cancel_all_orders"):
+            try:
+                log.info("[INIT] Cancelando órdenes huérfanas de sesiones anteriores...")
+                await asyncio.wait_for(self.exchange.cancel_all_orders(), timeout=10.0)
+                log.info("[INIT] Órdenes huérfanas canceladas ✓")
+            except asyncio.TimeoutError:
+                log.warning("[INIT] cancel_all_orders timeout al arrancar — continúa igual")
+            except Exception as exc:
+                log.warning(f"[INIT] Error cancelando órdenes al arrancar: {exc}")
+
         # Conectar Redis
         await self._connect_redis()
 
