@@ -63,29 +63,29 @@ log = logging.getLogger("optimizer")
 # ─────────────────────────────────────────────────────────────────────────────
 
 BOUNDS = {
-    "STAKE_USD":     (20.0,  200.0),
-    "BTC_MIN_PCT":   (0.05,  0.30),   # % mínimo momentum
-    "BTC_WINDOW_S":  (15,    60),      # ventana en segundos
-    "TP_PCT":        (0.010, 0.040),   # % take profit
-    "SL_DROP_PCT":   (0.005, 0.020),   # % stop loss
-    "MAX_OPEN_POS":  (1,     3),       # posiciones simultáneas
-    "THROTTLE_S":    (10,    60),      # segundos entre entradas
-    "MAX_HOLD_S":    (120,   600),     # segundos máximo en posición
-    "TP_PARTIAL_PCT":(0.005, 0.020),   # % TP parcial
-    "DAILY_LOSS_LIMIT": (30.0, 300.0),
+    "STAKE_USD":        (20.0,   100.0),   # nocturno=$20, máximo=$100
+    "BTC_MIN_PCT":      (0.005,  0.10),    # 0.005%–0.10% momentum en ventana
+    "BTC_WINDOW_S":     (15,     60),      # ventana en segundos
+    "TP_PCT":           (0.0010, 0.010),   # 0.10%–1.00% take profit
+    "SL_DROP_PCT":      (0.001,  0.008),   # 0.10%–0.80% stop loss
+    "MAX_OPEN_POS":     (1,      1),       # siempre 1 (sin acumulación)
+    "THROTTLE_S":       (10,     60),      # segundos entre entradas
+    "MAX_HOLD_S":       (120,    600),     # segundos máximo en posición
+    "TP_PARTIAL_PCT":   (0.0005, 0.005),   # 0.05%–0.50% TP parcial
+    "DAILY_LOSS_LIMIT": (50.0,   200.0),
 }
 
-# Parámetros iniciales 7.5/10 de riesgo (se pisan con lo que hay en Redis si ya existe)
+# Parámetros iniciales — reflejan la config actual del .env tuneado
 INITIAL_PARAMS = {
-    "STAKE_USD":       75.0,
-    "BTC_MIN_PCT":     0.08,
-    "BTC_WINDOW_S":    20,
-    "TP_PCT":          0.020,
-    "TP_PARTIAL_PCT":  0.010,
-    "SL_DROP_PCT":     0.008,
-    "MAX_OPEN_POS":    2,
-    "THROTTLE_S":      15,
-    "MAX_HOLD_S":      240,
+    "STAKE_USD":        100.0,
+    "BTC_MIN_PCT":      0.01,
+    "BTC_WINDOW_S":     30,
+    "TP_PCT":           0.0015,
+    "TP_PARTIAL_PCT":   0.0008,
+    "SL_DROP_PCT":      0.002,
+    "MAX_OPEN_POS":     1,
+    "THROTTLE_S":       15,
+    "MAX_HOLD_S":       300,
     "DAILY_LOSS_LIMIT": 100.0,
 }
 
@@ -341,6 +341,24 @@ async def optimize_cycle(r: aioredis.Redis, cycle: int):
         )
 
 
+async def _heartbeat_loop(r: aioredis.Redis):
+    """Publica heartbeat cada 10s para que el dashboard lo detecte como vivo."""
+    while True:
+        try:
+            ts = time.time()
+            payload = json.dumps({
+                "bot":       "optimizer",
+                "status":    "online",
+                "timestamp": ts,
+            })
+            await r.publish("health:heartbeats", payload)
+            # Estado completo para el dashboard
+            await r.set("state:optimizer:latest", payload)
+        except Exception:
+            pass
+        await asyncio.sleep(10)
+
+
 async def main():
     log.info("=" * 55)
     log.info("  CalvinBTC · Param Optimizer — iniciando")
@@ -355,14 +373,34 @@ async def main():
         log.error(f"Redis no disponible: {ex}")
         sys.exit(1)
 
+    # Resetear params si están fuera de los nuevos bounds (config obsoleta)
+    try:
+        existing_raw = await r.get(REDIS_KEY)
+        if existing_raw:
+            saved = json.loads(existing_raw).get("params", {})
+            out_of_bounds = any(
+                saved.get(k, lo) < lo or saved.get(k, hi) > hi
+                for k, (lo, hi) in BOUNDS.items()
+            )
+            if out_of_bounds:
+                log.warning("[INIT] Params guardados fuera de nuevos bounds — reseteando a INITIAL_PARAMS")
+                await save_params(r, dict(INITIAL_PARAMS), {}, "reset_bounds_actualizados")
+    except Exception as ex:
+        log.warning(f"[INIT] Error verificando params existentes: {ex}")
+
     cycle = 0
-    while True:
-        cycle += 1
-        try:
-            await optimize_cycle(r, cycle)
-        except Exception as ex:
-            log.error(f"Error en ciclo {cycle}: {ex}")
-        await asyncio.sleep(OPTIMIZE_INTERVAL_MIN * 60)
+
+    async def _optimize_loop():
+        nonlocal cycle
+        while True:
+            cycle += 1
+            try:
+                await optimize_cycle(r, cycle)
+            except Exception as ex:
+                log.error(f"Error en ciclo {cycle}: {ex}")
+            await asyncio.sleep(OPTIMIZE_INTERVAL_MIN * 60)
+
+    await asyncio.gather(_optimize_loop(), _heartbeat_loop(r))
 
 
 if __name__ == "__main__":

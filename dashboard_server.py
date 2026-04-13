@@ -164,6 +164,7 @@ async def collect_state() -> dict:
     strategy = {}
     executor = {}
     watchdog = {}
+    optimizer = {}
 
     try:
         r = await _get_redis()
@@ -173,12 +174,15 @@ async def collect_state() -> dict:
             raw_s = await r.get("state:strategy:latest")
             raw_e = await r.get("state:executor:latest")
             raw_w = await r.get("state:watchdog:latest")
+            raw_o = await r.get("state:optimizer:latest")
             if raw_s:
                 strategy = json.loads(raw_s)
             if raw_e:
                 executor = json.loads(raw_e)
             if raw_w:
                 watchdog = json.loads(raw_w)
+            if raw_o:
+                optimizer = json.loads(raw_o)
             raw_rp = await r.get("binance:real_positions")
             real_positions = json.loads(raw_rp) if raw_rp else []
     except Exception as ex:
@@ -219,10 +223,10 @@ async def collect_state() -> dict:
                 return False
         return (now - ts) < 20
 
-    strategy_alive = _alive(strategy)
-    executor_alive = _alive(executor)
-    watchdog_alive = _alive(watchdog)
-    optimizer_alive = watchdog.get("optimizer_ok", False) if watchdog else False
+    strategy_alive  = _alive(strategy)
+    executor_alive  = _alive(executor)
+    watchdog_alive  = _alive(watchdog)
+    optimizer_alive = _alive(optimizer)
 
     open_positions = strategy.get("positions_data", [])
     params         = strategy.get("params", {})
