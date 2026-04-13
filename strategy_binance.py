@@ -444,16 +444,15 @@ class SignalEngine:
                 sl_hit  = btc_price < pos.sl_price   # precio baja = pérdida en LONG
 
             # ── Verificar si SL fue disparado por Binance ────────────────────
-            if sl_hit and pos.stop_order_id:
+            # Enviamos orden de cierre real: si Binance ya la cerró vía stop nativo
+            # recibiremos -2022 ReduceOnly rejected → tratado como éxito silencioso.
+            if sl_hit:
                 sl_dir = ">" if is_short else "<"
                 self._lwarn(
                     f"[MANAGE] SL detectado en pos {pos.position_id} ({pos.side}): "
-                    f"precio={btc_price:.2f} {sl_dir} sl={pos.sl_price:.2f} "
-                    f"— Binance debería haber ejecutado orderId={pos.stop_order_id}"
+                    f"precio={btc_price:.2f} {sl_dir} sl={pos.sl_price:.2f} — cerrando"
                 )
-                pnl_usd = pos.qty_base * (pos.entry_price - btc_price) if is_short \
-                          else pos.qty_base * (btc_price - pos.entry_price)
-                await self._close_position_local(pos, btc_price, "SL_BINANCE", pnl_usd)
+                await self._execute_sell(pos, btc_price, pos.qty_base, "SL_BINANCE")
                 continue
 
             # ── Take Profit parcial ──────────────────────────────────────────
