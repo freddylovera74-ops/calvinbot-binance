@@ -566,6 +566,39 @@ class BinanceFuturesExchange:
             log.warning(f"[FUTURES] Error en reconcile: {exc} — manteniendo tracker")
             return tracked
 
+    async def fetch_real_positions(self) -> list:
+        """
+        Retorna todas las posiciones reales abiertas en Binance Futures.
+        Cada elemento: {symbol, side, qty, entry_price, unrealized_pnl, margin}
+        """
+        if DRY_RUN or self._client is None:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            positions = await loop.run_in_executor(
+                None,
+                lambda: self._client.fetch_positions([self._symbol])
+            )
+            result = []
+            for p in positions:
+                qty = float(p.get("positionAmt", 0) or 0)
+                if qty == 0:
+                    continue
+                result.append({
+                    "symbol":          p.get("symbol", self._symbol),
+                    "side":            "LONG" if qty > 0 else "SHORT",
+                    "qty":             abs(qty),
+                    "entry_price":     float(p.get("entryPrice", 0) or 0),
+                    "mark_price":      float(p.get("markPrice", 0) or 0),
+                    "unrealized_pnl":  float(p.get("unrealizedProfit", 0) or 0),
+                    "margin":          float(p.get("isolatedMargin", 0) or p.get("initialMargin", 0) or 0),
+                    "leverage":        int(p.get("leverage", 20) or 20),
+                })
+            return result
+        except Exception as exc:
+            log.warning(f"[FUTURES] Error obteniendo posiciones reales: {exc}")
+            return []
+
     async def fetch_open_orders(self, symbol: str) -> list:
         """Retorna lista de órdenes abiertas para el símbolo."""
         if DRY_RUN or self._client is None:

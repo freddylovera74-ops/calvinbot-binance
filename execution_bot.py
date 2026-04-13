@@ -1426,6 +1426,70 @@ class ExecutionBot:
                     # Reset para no spammear cada 30s
                     self._last_signal_ts = time.time()
 
+    # ── Monitor de posiciones reales en Binance ───────────────────────────────
+
+    async def _binance_positions_monitor(self) -> None:
+        """
+        Cada 5 minutos consulta las posiciones reales abiertas en Binance Futures.
+        Si encuentra posiciones no trackeadas (huérfanas), las alerta via log y Redis.
+        Publica el estado en Redis key 'binance:real_positions' para el dashboard.
+        """
+        INTERVAL_S = 300  # 5 minutos
+        if not hasattr(self.exchange, "fetch_real_positions"):
+            return
+
+        while True:
+            await asyncio.sleep(INTERVAL_S)
+            try:
+                real_positions = await self.exchange.fetch_real_positions()
+
+                # Publicar en Redis para el dashboard
+                if self._redis_pub:
+                    await self._redis_pub.set(
+                        "binance:real_positions",
+                        json.dumps(real_positions),
+                        ex=600,  # expira en 10min
+                    )
+
+                if not real_positions:
+                    log.info("[POS-MONITOR] Binance: sin posiciones abiertas ✓")
+                    continue
+
+                # Calcular PnL total no rastreado
+                total_pnl  = sum(p["unrealized_pnl"] for p in real_positions)
+                total_qty  = sum(p["qty"] for p in real_positions)
+                total_margin = sum(p["margin"] for p in real_positions)
+
+                log.info(
+                    f"[POS-MONITOR] Binance tiene {len(real_positions)} posición(es) abierta(s): "
+                    f"qty={total_qty:.4f} BTC margen=${total_margin:.2f} PnL={total_pnl:+.2f}$"
+                )
+
+                for p in real_positions:
+                    tracked = p["symbol"] in [
+                        v.get("token_id") for v in self._open_positions.values()
+                    ]
+                    if not tracked:
+                        log.warning(
+                            f"[POS-MONITOR] ⚠ POSICIÓN HUÉRFANA en Binance NO trackeada: "
+                            f"{p['side']} {p['qty']:.4f} BTC @ ${p['entry_price']:.2f} "
+                            f"PnL={p['unrealized_pnl']:+.2f}$ margen=${p['margin']:.2f}"
+                        )
+                        # Notificar via Telegram si pérdida grande
+                        if p["unrealized_pnl"] < -20:
+                            from utils import send_telegram_async
+                            await send_telegram_async(
+                                f"⚠ Posición huérfana en Binance\n"
+                                f"{p['side']} {p['qty']:.4f} BTC @ ${p['entry_price']:.2f}\n"
+                                f"PnL: {p['unrealized_pnl']:+.2f}$ | Margen: ${p['margin']:.2f}\n"
+                                f"Ciérrala manualmente en Binance.",
+                                level="WARNING",
+                                prefix_label="CalvinBTC · Executor",
+                            )
+
+            except Exception as exc:
+                log.warning(f"[POS-MONITOR] Error consultando posiciones: {exc}")
+
     # ── Bucle de escucha de señales ───────────────────────────────────────────
 
     async def _signal_stream_loop(self) -> None:
@@ -1593,6 +1657,7 @@ class ExecutionBot:
             self._watchdog_heartbeat_check(),          # Monitorea watchdog desde stream
             self._watchdog_monitor_loop(),             # Monitorea último comando del watchdog
             self._stuck_monitor(),                     # Detecta si el bot se cuelga sin procesar señales
+            self._binance_positions_monitor(),         # Monitorea posiciones reales en Binance cada 5min
         )
 
     async def shutdown(self) -> None:

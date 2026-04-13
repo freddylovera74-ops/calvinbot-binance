@@ -179,6 +179,8 @@ async def collect_state() -> dict:
                 executor = json.loads(raw_e)
             if raw_w:
                 watchdog = json.loads(raw_w)
+            raw_rp = await r.get("binance:real_positions")
+            real_positions = json.loads(raw_rp) if raw_rp else []
     except Exception as ex:
         log.debug(f"Redis error: {ex}")
         await _reset_redis()
@@ -224,6 +226,10 @@ async def collect_state() -> dict:
 
     open_positions = strategy.get("positions_data", [])
     params         = strategy.get("params", {})
+    try:
+        real_positions
+    except NameError:
+        real_positions = []
 
     return {
         "ts":          now,
@@ -247,8 +253,9 @@ async def collect_state() -> dict:
         "stats":       stats,
 
         # Positions
-        "open_positions": open_positions,
-        "entries_paused": strategy.get("entries_paused", False),
+        "open_positions":  open_positions,
+        "real_positions":  real_positions,   # posiciones reales en Binance (cada 5min)
+        "entries_paused":  strategy.get("entries_paused", False),
 
         # Trades
         "recent_trades": recent,
@@ -627,6 +634,24 @@ _HTML = r"""<!DOCTYPE html>
     </table>
   </div>
 
+  <!-- Posiciones reales en Binance (monitor cada 5min) -->
+  <div class="section" id="real-pos-section" style="display:none">
+    <div class="section-header">
+      <span class="section-title" style="color:var(--yellow)">⚠ Posiciones en Binance no trackeadas</span>
+      <span class="count-badge" id="real-pos-count">0</span>
+    </div>
+    <div style="color:var(--muted);font-size:12px;margin-bottom:8px">
+      El bot encontró posiciones abiertas en Binance que no controla. Ciérralas manualmente si no las reconoces.
+    </div>
+    <table>
+      <thead><tr>
+        <th>Side</th><th>Qty (BTC)</th><th>Entry Price</th>
+        <th>Mark Price</th><th>PnL no realizado</th><th>Margen usado</th>
+      </tr></thead>
+      <tbody id="real-pos-tbody"></tbody>
+    </table>
+  </div>
+
   <!-- Recent trades -->
   <div class="section">
     <div class="section-header">
@@ -811,6 +836,28 @@ function applyState(s) {
         <td style="color:var(--muted)">${hold(heldSec)}</td>
       </tr>`;
     }).join('');
+  }
+
+  // Posiciones reales en Binance
+  const realPos = s.real_positions || [];
+  const rpSection = $('real-pos-section');
+  if (realPos.length > 0) {
+    rpSection.style.display = '';
+    $('real-pos-count').textContent = realPos.length;
+    $('real-pos-tbody').innerHTML = realPos.map(p => {
+      const pnlClass = colorClass(p.unrealized_pnl);
+      const sideColor = p.side === 'LONG' ? 'var(--green)' : 'var(--red)';
+      return `<tr>
+        <td style="color:${sideColor};font-weight:700">${p.side}</td>
+        <td>${fmt(p.qty, 4)} BTC</td>
+        <td>$${Number(p.entry_price).toLocaleString('en', {minimumFractionDigits:2})}</td>
+        <td>$${Number(p.mark_price).toLocaleString('en', {minimumFractionDigits:2})}</td>
+        <td class="${pnlClass}" style="font-weight:600">${fmtP(p.unrealized_pnl)} USDT</td>
+        <td style="color:var(--muted)">$${fmt(p.margin, 2)}</td>
+      </tr>`;
+    }).join('');
+  } else {
+    rpSection.style.display = 'none';
   }
 
   // Recent trades table
