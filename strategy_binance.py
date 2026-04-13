@@ -62,8 +62,14 @@ SL_DROP_PCT      = float(os.getenv("SL_DROP_PCT",  "0.008"))
 MAX_HOLD_S       = int(os.getenv("MAX_HOLD_S",    "240"))
 THROTTLE_S       = int(os.getenv("THROTTLE_S",     "15"))
 MAX_OPEN_POS     = int(os.getenv("MAX_OPEN_POS",   "2"))
-SLIP_MAX_PCT     = float(os.getenv("SLIP_MAX_PCT", "0.004"))
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "100.0"))
+SLIP_MAX_PCT       = float(os.getenv("SLIP_MAX_PCT",      "0.002"))  # rechazar si slippage > 0.2%
+DAILY_LOSS_LIMIT   = float(os.getenv("DAILY_LOSS_LIMIT",  "100.0"))
+ENTRY_GRACE_S      = int(os.getenv("ENTRY_GRACE_S",       "15"))    # segundos sin revisar SL tras abrir
+SHORT_BLOCK_MOM    = float(os.getenv("SHORT_BLOCK_MOM",   "0.5"))   # bloquear SHORT si mom > +0.5%
+HOURLY_LOSS_LIMIT  = float(os.getenv("HOURLY_LOSS_LIMIT", "80.0"))  # pérdida máx en 1h → auto-pause
+NIGHT_STAKE_USD    = float(os.getenv("NIGHT_STAKE_USD",   "20.0"))  # stake nocturno
+NIGHT_HOUR_START   = int(os.getenv("NIGHT_HOUR_START",    "22"))    # inicio modo nocturno (hora Madrid)
+NIGHT_HOUR_END     = int(os.getenv("NIGHT_HOUR_END",       "9"))    # fin modo nocturno
 
 REDIS_KEY_PARAMS     = "config:strategy_binance:current"
 TRADING_HOUR_START   = int(os.getenv("TRADING_HOUR_START", "9"))
@@ -143,7 +149,19 @@ class SignalEngine:
         self.entries_paused:   bool                      = False
         self.pending_receipts: Dict[str, asyncio.Future] = {}
         self.last_param_reload: float                    = 0.0
-        self._last_blocked_log:  float                   = 0.0   # throttle del log de bloqueo
+        self._last_blocked_log:  float                   = 0.0
+
+        # ── Drawdown horario ──────────────────────────────────────────────────
+        self._hourly_trades:    List[Tuple[float, float]] = []  # (ts, pnl_usd)
+        self._drawdown_paused:  bool                      = False
+        self._tg_update_id:     int                       = 0   # último update de Telegram
+
+        # ── Modo nocturno ─────────────────────────────────────────────────────
+        self._night_mode:       bool                      = False
+        self._base_stake_usd:   float                     = STAKE_USD  # stake original del .env
+
+        # ── Reporte diario ────────────────────────────────────────────────────
+        self._last_report_day:  str                       = ""  # "YYYY-MM-DD"
 
         # ── Parámetros dinámicos (copiados de module-level, overwrite por optimizer) ──
         self.stake_usd        = STAKE_USD
@@ -311,6 +329,10 @@ class SignalEngine:
             short_min_pct = self.btc_min_pct * 3
             if abs(mom_pct) < short_min_pct:
                 return False, "", f"SHORT: momentum insuficiente ({mom_pct:+.3f}% < -{short_min_pct:.3f}%)"
+            # Bloquear SHORT si tendencia general es alcista (ventana larga)
+            trend_pct, trend_dir = bp.get_momentum(window_s=120)
+            if trend_pct > SHORT_BLOCK_MOM:
+                return False, "", f"SHORT bloqueado: tendencia alcista en 2min (+{trend_pct:.3f}% > +{SHORT_BLOCK_MOM:.3f}%)"
             return True, "SHORT", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
 
         return False, "", "sin dirección clara"
@@ -377,7 +399,21 @@ class SignalEngine:
 
         slip_pct = abs(fill_price - btc_price) / btc_price
         if slip_pct > SLIP_MAX_PCT:
-            self._lwarn(f"[ENTRY] Slippage alto: {slip_pct:.3%} (señal={btc_price:.2f} fill={fill_price:.2f})")
+            self._lwarn(
+                f"[ENTRY] Slippage excesivo {slip_pct:.3%} > {SLIP_MAX_PCT:.3%} "
+                f"(señal={btc_price:.2f} fill={fill_price:.2f}) — cerrando posición"
+            )
+            # Cerrar inmediatamente para evitar pérdida por SL mal calculado
+            await self._execute_sell(
+                Position(
+                    position_id=pos_id, symbol=SYMBOL, side=direction,
+                    entry_price=fill_price, size_usd=self.stake_usd,
+                    qty_base=qty_btc, stop_order_id=stop_order_id,
+                    tp_price=fill_price, sl_price=fill_price, opened_at=time.time(),
+                ),
+                fill_price, qty_btc, "SLIP_ABORT"
+            )
+            return
 
         if direction == "SHORT":
             tp_price = fill_price * (1 - self.tp_pct)       # TP: precio baja
@@ -448,8 +484,11 @@ class SignalEngine:
                 sl_hit  = btc_price < pos.sl_price   # precio baja = pérdida en LONG
 
             # ── Verificar si SL fue disparado por Binance ────────────────────
-            # Enviamos orden de cierre real: si Binance ya la cerró vía stop nativo
-            # recibiremos -2022 ReduceOnly rejected → tratado como éxito silencioso.
+            # Grace period: no revisar SL los primeros ENTRY_GRACE_S segundos.
+            # Evita cierres instantáneos por slippage en el momento de entrada.
+            if sl_hit and holding_s < ENTRY_GRACE_S:
+                continue
+
             if sl_hit:
                 sl_dir = ">" if is_short else "<"
                 self._lwarn(
@@ -555,6 +594,7 @@ class SignalEngine:
             self.open_pos.remove(pos)
 
         self.session_pnl += pnl_usd
+        self._hourly_trades.append((time.time(), pnl_usd))
         loss_tracker.record_pnl(pnl_usd)
 
         if pos.side == "SHORT":
@@ -801,6 +841,196 @@ class SignalEngine:
         except Exception as ex:
             self._lwarn(f"[PARAMS] Error recargando params dinámicos: {ex}")
 
+    # ── Auto-pause por drawdown horario ──────────────────────────────────────
+
+    async def _drawdown_monitor(self) -> None:
+        """
+        Cada 30s revisa las pérdidas de la última hora.
+        Si superan HOURLY_LOSS_LIMIT, pausa entradas y alerta por Telegram.
+        El usuario despausa respondiendo /resume al bot de Telegram.
+        """
+        while True:
+            await asyncio.sleep(30)
+            try:
+                now    = time.time()
+                cutoff = now - 3600
+                # Limpiar trades más viejos de 1h
+                self._hourly_trades = [(ts, p) for ts, p in self._hourly_trades if ts >= cutoff]
+                hourly_loss = sum(p for _, p in self._hourly_trades if p < 0)
+
+                if hourly_loss <= -HOURLY_LOSS_LIMIT and not self._drawdown_paused:
+                    self._drawdown_paused  = True
+                    self.entries_paused    = True
+                    self._linfo(
+                        f"[DRAWDOWN] Pérdida última hora: ${hourly_loss:.2f} >= límite ${HOURLY_LOSS_LIMIT:.0f} "
+                        f"— entradas PAUSADAS"
+                    )
+                    await send_telegram_async(
+                        f"🔴 AUTO-PAUSA por drawdown\n"
+                        f"Pérdida en la última hora: ${hourly_loss:.2f}\n"
+                        f"Límite configurado: ${HOURLY_LOSS_LIMIT:.0f}\n\n"
+                        f"El bot ha pausado las entradas automáticamente.\n"
+                        f"Responde /resume para reanudar.",
+                        level="WARNING",
+                        prefix_label="CalvinBTC · Auto-Pausa",
+                    )
+
+            except Exception as exc:
+                self._lwarn(f"[DRAWDOWN] Error en monitor: {exc}")
+
+    async def _telegram_command_listener(self) -> None:
+        """
+        Escucha comandos de Telegram. Solo acepta /resume para despausar el bot
+        tras una auto-pausa por drawdown.
+        """
+        import aiohttp
+        token   = os.getenv("TG_TOKEN", "")
+        chat_id = os.getenv("TG_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+
+        while True:
+            await asyncio.sleep(10)
+            try:
+                url    = f"https://api.telegram.org/bot{token}/getUpdates"
+                params = {"offset": self._tg_update_id + 1, "timeout": 5, "limit": 10}
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                        data = await resp.json()
+
+                if not data.get("ok"):
+                    continue
+
+                for update in data.get("result", []):
+                    self._tg_update_id = update["update_id"]
+                    msg_text = update.get("message", {}).get("text", "").strip().lower()
+                    from_id  = str(update.get("message", {}).get("from", {}).get("id", ""))
+
+                    if from_id != chat_id:
+                        continue  # solo acepta tu chat_id
+
+                    if msg_text == "/resume" and self._drawdown_paused:
+                        self._drawdown_paused = False
+                        self.entries_paused   = False
+                        self._linfo("[TELEGRAM] /resume recibido — entradas reanudadas")
+                        await send_telegram_async(
+                            "✅ Bot reanudado por /resume\nLas entradas vuelven a estar activas.",
+                            level="INFO",
+                            prefix_label="CalvinBTC · Telegram",
+                        )
+                    elif msg_text == "/status":
+                        mom_pct, mom_dir = bp.get_momentum(window_s=self.btc_window_s)
+                        btc = bp.get_btc_price()
+                        await send_telegram_async(
+                            f"📊 Estado CalvinBTC\n"
+                            f"BTC: ${btc:,.2f} | mom: {mom_pct:+.3f}% {mom_dir or '—'}\n"
+                            f"PnL sesión: ${self.session_pnl:+.2f}\n"
+                            f"Posiciones: {len(self.open_pos)}/{self.max_open_pos}\n"
+                            f"Modo: {'🌙 nocturno' if self._night_mode else '☀️ diurno'}\n"
+                            f"Pausado: {'⛔ SÍ' if self.entries_paused else '✅ NO'}",
+                            level="INFO",
+                            prefix_label="CalvinBTC · Status",
+                        )
+
+            except Exception as exc:
+                self._lwarn(f"[TELEGRAM] Error en listener: {exc}")
+
+    # ── Modo conservador nocturno ─────────────────────────────────────────────
+
+    async def _night_mode_monitor(self) -> None:
+        """
+        Cambia el stake automáticamente según la hora Madrid.
+        Noche (22h-09h): stake reducido a NIGHT_STAKE_USD ($20)
+        Día (09h-22h):   stake normal del .env ($100)
+        """
+        while True:
+            await asyncio.sleep(60)
+            try:
+                hora_madrid = madrid_now().hour
+                es_noche = (hora_madrid >= NIGHT_HOUR_START or hora_madrid < NIGHT_HOUR_END)
+
+                if es_noche and not self._night_mode:
+                    self._night_mode  = True
+                    self.stake_usd    = NIGHT_STAKE_USD
+                    self._linfo(
+                        f"[NIGHT] Modo nocturno activado ({hora_madrid}h Madrid) "
+                        f"— stake reducido a ${NIGHT_STAKE_USD:.0f}"
+                    )
+                    await send_telegram_async(
+                        f"🌙 Modo nocturno activado ({hora_madrid}h Madrid)\n"
+                        f"Stake reducido: ${self._base_stake_usd:.0f} → ${NIGHT_STAKE_USD:.0f}",
+                        level="INFO",
+                        prefix_label="CalvinBTC · Noche",
+                    )
+
+                elif not es_noche and self._night_mode:
+                    self._night_mode = False
+                    self.stake_usd   = self._base_stake_usd
+                    self._linfo(
+                        f"[NIGHT] Modo diurno activado ({hora_madrid}h Madrid) "
+                        f"— stake restaurado a ${self._base_stake_usd:.0f}"
+                    )
+                    await send_telegram_async(
+                        f"☀️ Modo diurno activado ({hora_madrid}h Madrid)\n"
+                        f"Stake restaurado: ${NIGHT_STAKE_USD:.0f} → ${self._base_stake_usd:.0f}",
+                        level="INFO",
+                        prefix_label="CalvinBTC · Día",
+                    )
+
+            except Exception as exc:
+                self._lwarn(f"[NIGHT] Error en monitor nocturno: {exc}")
+
+    # ── Reporte diario ────────────────────────────────────────────────────────
+
+    async def _daily_report(self) -> None:
+        """
+        Cada minuto revisa si son las 23:59 Madrid.
+        Si es así, envía resumen del día por Telegram (una sola vez por día).
+        """
+        while True:
+            await asyncio.sleep(60)
+            try:
+                now_madrid = madrid_now()
+                today_str  = now_madrid.strftime("%Y-%m-%d")
+
+                if now_madrid.hour == 23 and now_madrid.minute == 59 and today_str != self._last_report_day:
+                    self._last_report_day = today_str
+
+                    # Leer CSV para stats del día
+                    import csv as _csv
+                    path = Path(TRADES_CSV)
+                    day_trades = []
+                    if path.exists():
+                        with open(path, encoding="utf-8") as f:
+                            for row in _csv.DictReader(f):
+                                if row.get("timestamp", "").startswith(today_str):
+                                    day_trades.append(float(row.get("pnl_usd", 0)))
+
+                    total    = len(day_trades)
+                    wins     = sum(1 for p in day_trades if p > 0)
+                    losses   = total - wins
+                    pnl_day  = sum(day_trades)
+                    wr       = (wins / total * 100) if total else 0.0
+                    avg_win  = (sum(p for p in day_trades if p > 0) / wins) if wins else 0
+                    avg_loss = (sum(p for p in day_trades if p < 0) / losses) if losses else 0
+                    emoji    = "🟢" if pnl_day >= 0 else "🔴"
+
+                    await send_telegram_async(
+                        f"{emoji} Reporte diario — {today_str}\n\n"
+                        f"PnL del día: ${pnl_day:+.2f} USDT\n"
+                        f"Trades: {total} ({wins}✅ / {losses}❌)\n"
+                        f"Aciertos: {wr:.1f}%\n"
+                        f"Ganancia media: +${avg_win:.2f}\n"
+                        f"Pérdida media: ${avg_loss:.2f}\n"
+                        f"PnL sesión acumulado: ${self.session_pnl:+.2f}",
+                        level="INFO",
+                        prefix_label="CalvinBTC · Reporte Diario",
+                    )
+                    self._linfo(f"[REPORT] Reporte diario enviado: {total} trades, PnL={pnl_day:+.2f}$")
+
+            except Exception as exc:
+                self._lwarn(f"[REPORT] Error en reporte diario: {exc}")
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def _main_loop(self) -> None:
@@ -870,6 +1100,10 @@ class SignalEngine:
             self._receipt_listener(),
             self._heartbeat_loop(),
             self._main_loop(),
+            self._drawdown_monitor(),
+            self._telegram_command_listener(),
+            self._night_mode_monitor(),
+            self._daily_report(),
         )
 
 
