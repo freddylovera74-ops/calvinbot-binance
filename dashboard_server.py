@@ -364,7 +364,7 @@ async def broadcast_loop():
                     await ws.send_str(payload)
                 except Exception:
                     dead.add(ws)
-            _ws_clients -= dead
+            _ws_clients.difference_update(dead)
         except Exception as ex:
             log.error(f"Broadcast error: {ex}")
         await asyncio.sleep(1)
