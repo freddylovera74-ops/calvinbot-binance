@@ -63,30 +63,31 @@ log = logging.getLogger("optimizer")
 # ─────────────────────────────────────────────────────────────────────────────
 
 BOUNDS = {
-    "STAKE_USD":        (20.0,   100.0),   # nocturno=$20, máximo=$100
-    "BTC_MIN_PCT":      (0.005,  0.10),    # 0.005%–0.10% momentum en ventana
+    "STAKE_USD":        (10.0,   80.0),    # fallback margin — real sizing es risk-based
+    "BTC_MIN_PCT":      (0.05,   0.30),    # señal mínima momentum: 0.05%–0.30%
     "BTC_WINDOW_S":     (15,     60),      # ventana en segundos
-    "TP_PCT":           (0.0010, 0.010),   # 0.10%–1.00% take profit
-    "SL_DROP_PCT":      (0.001,  0.008),   # 0.10%–0.80% stop loss
+    # TP/SL deben mantener R:R >= 1.5 (TP >= SL × 1.5)
+    "TP_PCT":           (0.008,  0.025),   # 0.8%–2.5% take profit en precio
+    "SL_DROP_PCT":      (0.004,  0.015),   # 0.4%–1.5% stop loss en precio
     "MAX_OPEN_POS":     (1,      1),       # siempre 1 (sin acumulación)
-    "THROTTLE_S":       (10,     60),      # segundos entre entradas
-    "MAX_HOLD_S":       (120,    600),     # segundos máximo en posición
-    "TP_PARTIAL_PCT":   (0.0005, 0.005),   # 0.05%–0.50% TP parcial
-    "DAILY_LOSS_LIMIT": (50.0,   200.0),
+    "THROTTLE_S":       (60,     300),     # mínimo 1 min, máx 5 min entre entradas
+    "MAX_HOLD_S":       (1800,   7200),    # 30min–2h emergencia
+    "TP_PARTIAL_PCT":   (0.004,  0.015),   # TP parcial = ~50% del TP full
+    "DAILY_LOSS_LIMIT": (30.0,   100.0),
 }
 
-# Parámetros iniciales — reflejan la config actual del .env tuneado
+# Parámetros iniciales — reflejan la config correcta del .env post-refactor
 INITIAL_PARAMS = {
-    "STAKE_USD":        100.0,
-    "BTC_MIN_PCT":      0.01,
+    "STAKE_USD":        50.0,
+    "BTC_MIN_PCT":      0.10,
     "BTC_WINDOW_S":     30,
-    "TP_PCT":           0.0015,
-    "TP_PARTIAL_PCT":   0.0008,
-    "SL_DROP_PCT":      0.002,
+    "TP_PCT":           0.012,
+    "TP_PARTIAL_PCT":   0.006,
+    "SL_DROP_PCT":      0.008,
     "MAX_OPEN_POS":     1,
-    "THROTTLE_S":       15,
-    "MAX_HOLD_S":       300,
-    "DAILY_LOSS_LIMIT": 100.0,
+    "THROTTLE_S":       120,
+    "MAX_HOLD_S":       3600,
+    "DAILY_LOSS_LIMIT": 50.0,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

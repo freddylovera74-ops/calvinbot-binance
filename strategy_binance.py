@@ -44,6 +44,7 @@ from metrics import metrics
 import loss_tracker
 from utils import madrid_now, in_trading_hours, write_json_atomic, send_telegram_async
 from binance_exchange import BinanceSpotExchange
+from risk_engine import RiskEngine, TradeSafetyManager
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURACIÓN (defaults del entorno — el optimizer puede sobreescribirlos)
@@ -52,24 +53,35 @@ from binance_exchange import BinanceSpotExchange
 SYMBOL           = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 BASE_ASSET       = SYMBOL.replace("USDT", "")
 
-# Sizing — defaults riesgo 7.5/10
-STAKE_USD        = float(os.getenv("STAKE_USD_OVERRIDE", "75.0"))
-BTC_WINDOW_S     = int(os.getenv("BTC_WINDOW_S",   "30"))    # ventana momentum (s)
-BTC_MIN_PCT      = float(os.getenv("BTC_MIN_PCT",  "0.04"))  # 0.04% en 30s — equilibrio señal/ruido
-TP_PCT           = float(os.getenv("TP_PCT",       "0.020"))
-TP_PARTIAL_PCT   = float(os.getenv("TP_PARTIAL_PCT","0.010"))
-SL_DROP_PCT      = float(os.getenv("SL_DROP_PCT",  "0.008"))
-MAX_HOLD_S       = int(os.getenv("MAX_HOLD_S",    "240"))
-THROTTLE_S       = int(os.getenv("THROTTLE_S",     "15"))
-MAX_OPEN_POS     = int(os.getenv("MAX_OPEN_POS",   "2"))
-SLIP_MAX_PCT       = float(os.getenv("SLIP_MAX_PCT",      "0.002"))  # rechazar si slippage > 0.2%
-DAILY_LOSS_LIMIT   = float(os.getenv("DAILY_LOSS_LIMIT",  "100.0"))
-ENTRY_GRACE_S      = int(os.getenv("ENTRY_GRACE_S",       "15"))    # segundos sin revisar SL tras abrir
-SHORT_BLOCK_MOM    = float(os.getenv("SHORT_BLOCK_MOM",   "0.5"))   # bloquear SHORT si mom > +0.5%
-HOURLY_LOSS_LIMIT  = float(os.getenv("HOURLY_LOSS_LIMIT", "80.0"))  # pérdida máx en 1h → auto-pause
-NIGHT_STAKE_USD    = float(os.getenv("NIGHT_STAKE_USD",   "20.0"))  # stake nocturno
-NIGHT_HOUR_START   = int(os.getenv("NIGHT_HOUR_START",    "22"))    # inicio modo nocturno (hora Madrid)
-NIGHT_HOUR_END     = int(os.getenv("NIGHT_HOUR_END",       "9"))    # fin modo nocturno
+# Sizing — risk-based (reemplaza stake fijo)
+STAKE_USD        = float(os.getenv("STAKE_USD_OVERRIDE", "75.0"))   # fallback si no hay balance real
+BTC_WINDOW_S     = int(os.getenv("BTC_WINDOW_S",   "30"))
+BTC_MIN_PCT      = float(os.getenv("BTC_MIN_PCT",  "0.10"))  # señal mínima de momentum (0.10% en 30s)
+TP_PCT           = float(os.getenv("TP_PCT",       "0.012"))  # 1.2% TP en precio (R:R >= 1.5 con SL 0.8%)
+TP_PARTIAL_PCT   = float(os.getenv("TP_PARTIAL_PCT","0.006"))  # 0.6% TP parcial (50% del TP total)
+SL_DROP_PCT      = float(os.getenv("SL_DROP_PCT",  "0.008"))  # 0.8% SL en precio
+MAX_HOLD_S       = int(os.getenv("MAX_HOLD_S",    "3600"))   # 1h emergencia (no salida principal)
+THROTTLE_S       = int(os.getenv("THROTTLE_S",    "120"))    # mín 2 min entre aperturas
+MAX_OPEN_POS     = int(os.getenv("MAX_OPEN_POS",   "1"))
+SLIP_MAX_PCT       = float(os.getenv("SLIP_MAX_PCT",      "0.003"))
+DAILY_LOSS_LIMIT   = float(os.getenv("DAILY_LOSS_LIMIT",  "50.0"))
+ENTRY_GRACE_S      = int(os.getenv("ENTRY_GRACE_S",       "30"))    # grace period SL tras apertura
+SHORT_BLOCK_MOM    = float(os.getenv("SHORT_BLOCK_MOM",   "0.5"))
+HOURLY_LOSS_LIMIT  = float(os.getenv("HOURLY_LOSS_LIMIT", "30.0"))
+NIGHT_STAKE_USD    = float(os.getenv("NIGHT_STAKE_USD",   "20.0"))  # sin efecto con risk-based sizing
+NIGHT_HOUR_START   = int(os.getenv("NIGHT_HOUR_START",    "22"))
+NIGHT_HOUR_END     = int(os.getenv("NIGHT_HOUR_END",       "9"))
+
+# ── Motor de riesgo — parámetros críticos ─────────────────────────────────────
+RISK_PCT              = float(os.getenv("RISK_PCT",              "0.0025"))  # 0.25% wallet por trade
+MIN_RR                = float(os.getenv("MIN_RR",                "1.5"))     # R:R mínimo requerido
+MAX_TRADES_PER_HOUR   = int(os.getenv("MAX_TRADES_PER_HOUR",    "3"))       # máx trades en 60 min
+COOLDOWN_AFTER_LOSS_S = float(os.getenv("COOLDOWN_AFTER_LOSS_S","300.0"))  # 5 min cooldown tras pérdida
+MAX_CONSECUTIVE_LOSSES= int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # pausa tras N pérdidas seguidas
+MIN_TRADE_NOTIONAL_USD= float(os.getenv("MIN_TRADE_NOTIONAL_USD","5.0"))   # notional mínimo anti-micro
+COMMISSION_RATE       = float(os.getenv("COMMISSION_RATE",       "0.0004")) # 0.04% taker Binance Futures
+LEVERAGE              = int(os.getenv("LEVERAGE",                "20"))
+FALLBACK_WALLET_USD   = float(os.getenv("FALLBACK_WALLET_USD",   "200.0"))  # wallet fallback si no hay dato
 
 REDIS_KEY_PARAMS     = "config:strategy_binance:current"
 TRADING_HOUR_START   = int(os.getenv("TRADING_HOUR_START", "9"))
@@ -142,6 +154,15 @@ class SignalEngine:
         # ── Conexión ─────────────────────────────────────────────────────────
         self.redis: Optional[aioredis.Redis] = None
 
+        # ── Motor de riesgo ───────────────────────────────────────────────────
+        self.risk_engine = RiskEngine(leverage=LEVERAGE, taker_rate=COMMISSION_RATE)
+        self.safety      = TradeSafetyManager(
+            max_per_hour    = MAX_TRADES_PER_HOUR,
+            cooldown_loss_s = COOLDOWN_AFTER_LOSS_S,
+            max_consecutive = MAX_CONSECUTIVE_LOSSES,
+        )
+        self._cached_wallet_usd: float = FALLBACK_WALLET_USD  # se actualiza desde Redis
+
         # ── Estado de trading ─────────────────────────────────────────────────
         self.open_pos:         List[Position]            = []
         self.session_pnl:      float                     = 0.0
@@ -174,6 +195,10 @@ class SignalEngine:
         self.throttle_s       = THROTTLE_S
         self.max_open_pos     = MAX_OPEN_POS
         self.daily_loss_limit = DAILY_LOSS_LIMIT
+        # ── Parámetros del motor de riesgo (recargables) ───────────────────────
+        self.risk_pct              = RISK_PCT
+        self.min_rr                = MIN_RR
+        self.cooldown_after_loss_s = COOLDOWN_AFTER_LOSS_S
 
     # ── Logging helpers ───────────────────────────────────────────────────────
 
@@ -297,8 +322,13 @@ class SignalEngine:
         Returns:
             (can_enter: bool, direction: str, reason: str)
         """
-        if self.entries_paused:
+        if self.entries_paused or self._drawdown_paused:
             return False, "", "entradas pausadas por control externo"
+
+        # ── Seguridad del motor de riesgo ─────────────────────────────────────
+        safe_ok, safe_reason = self.safety.check_safe_to_trade()
+        if not safe_ok:
+            return False, "", safe_reason
 
         if len(self.open_pos) >= self.max_open_pos:
             return False, "", f"máx posiciones abiertas ({self.max_open_pos})"
@@ -312,6 +342,14 @@ class SignalEngine:
 
         if not DISABLE_TRADING_HOURS and not in_trading_hours(TRADING_HOUR_START, TRADING_HOUR_END):
             return False, "", f"fuera de horario Madrid ({TRADING_HOUR_START}h-{TRADING_HOUR_END}h)"
+
+        # ── Validación de R:R antes de buscar señal ───────────────────────────
+        rr_ok, rr_ratio = self.risk_engine.check_rr(self.tp_pct, self.sl_drop_pct, self.min_rr)
+        if not rr_ok:
+            return False, "", (
+                f"RR_INSUFICIENTE: R:R={rr_ratio:.2f} < mínimo {self.min_rr} "
+                f"(TP={self.tp_pct:.3%} SL={self.sl_drop_pct:.3%})"
+            )
 
         btc_price_current = bp.get_btc_price()
         if btc_price_current is None:
@@ -340,21 +378,34 @@ class SignalEngine:
     # ── Apertura de posición ──────────────────────────────────────────────────
 
     async def _open_position(self) -> None:
-        """Intenta abrir una posición LONG en BTC."""
+        """
+        Intenta abrir una posición LONG o SHORT en BTC.
+
+        Flujo:
+          1. Verificar condiciones de entrada (throttle, safety, R:R, momentum)
+          2. Calcular tamaño de posición basado en % de riesgo del wallet
+          3. Verificar viabilidad de comisión (ganancia esperada > comisión × 2)
+          4. Verificar tamaño mínimo de notional
+          5. Enviar señal al execution_bot y esperar receipt
+          6. Verificar slippage del fill
+          7. Registrar posición con SL/TP calculados sobre fill_price real
+        """
         can_enter, direction, reason = self._check_entry_conditions()
         if not can_enter:
-            # Log periódico (cada 60s) para diagnosticar por qué no entra
             now = time.time()
             if now - self._last_blocked_log >= 60:
                 self._last_blocked_log = now
                 btc = bp.get_btc_price()
                 mom_pct, mom_dir = bp.get_momentum(window_s=self.btc_window_s)
+                safety_stats = self.safety.stats()
                 btc_str = f"${btc:.2f}" if btc is not None else "N/A"
                 _log.info(
                     f"[SCAN] sin entrada — {reason} | "
                     f"BTC={btc_str} mom={mom_pct:+.4f}% dir={mom_dir} "
                     f"pos={len(self.open_pos)}/{self.max_open_pos} "
-                    f"pnl={self.session_pnl:+.2f}$ paused={self.entries_paused}"
+                    f"pnl={self.session_pnl:+.2f}$ "
+                    f"consec_losses={safety_stats['consecutive_losses']} "
+                    f"trades_hora={safety_stats['trades_last_hour']}/{safety_stats['max_per_hour']}"
                 )
             return
 
@@ -362,24 +413,65 @@ class SignalEngine:
         if btc_price is None:
             return
 
+        # ── 1. Tamaño de posición basado en riesgo ─────────────────────────────
+        stake_usd, est_qty = self.risk_engine.compute_position_size(
+            wallet   = self._cached_wallet_usd,
+            risk_pct = self.risk_pct,
+            sl_pct   = self.sl_drop_pct,
+            price    = btc_price,
+        )
+
+        if stake_usd <= 0 or est_qty <= 0:
+            self._lwarn(
+                f"[ENTRY] Tamaño de posición inválido: "
+                f"wallet=${self._cached_wallet_usd:.2f} risk={self.risk_pct:.3%} "
+                f"sl={self.sl_drop_pct:.3%} → stake={stake_usd:.2f}"
+            )
+            return
+
+        # ── 2. Verificar notional mínimo (anti-micro-trades) ──────────────────
+        notional = est_qty * btc_price
+        if notional < MIN_TRADE_NOTIONAL_USD:
+            self._lwarn(
+                f"[ENTRY] MICRO_TRADE bloqueado: notional=${notional:.2f} < "
+                f"mínimo ${MIN_TRADE_NOTIONAL_USD:.2f} "
+                f"(wallet=${self._cached_wallet_usd:.2f} risk={self.risk_pct:.3%})"
+            )
+            return
+
+        # ── 3. Verificar viabilidad de comisión ───────────────────────────────
+        comm_ok, comm_reason = self.risk_engine.check_commission(
+            qty_btc  = est_qty,
+            price    = btc_price,
+            tp_pct   = self.tp_pct,
+            min_ratio= 2.0,
+        )
+        if not comm_ok:
+            self._lwarn(f"[ENTRY] {comm_reason}")
+            return
+
         pos_id = str(uuid.uuid4())[:16]
 
         signal = {
             "action":      "BUY",
             "signal_id":   str(uuid.uuid4()),
-            "side":        direction,   # "LONG" o "SHORT"
+            "side":        direction,
             "token_id":    SYMBOL,
             "price":       btc_price,
-            "size_usd":    self.stake_usd,
+            "size_usd":    stake_usd,
             "position_id": pos_id,
             "timestamp":   datetime.now(timezone.utc).isoformat(),
         }
 
+        commission_est = self.risk_engine.estimate_commission(est_qty, btc_price)
         self._linfo(
             f"[ENTRY] {direction} {SYMBOL} | precio={btc_price:.2f} "
-            f"stake=${self.stake_usd:.2f} | {reason}"
+            f"wallet=${self._cached_wallet_usd:.2f} risk={self.risk_pct:.3%} "
+            f"→ margin=${stake_usd:.2f} qty≈{est_qty:.5f}BTC "
+            f"comisión≈${commission_est:.3f} | {reason}"
         )
         self.last_entry_ts = time.time()
+        self.safety.record_trade_opened()
 
         receipt = await self._send_signal(signal)
 
@@ -401,13 +493,13 @@ class SignalEngine:
         if slip_pct > SLIP_MAX_PCT:
             self._lwarn(
                 f"[ENTRY] Slippage excesivo {slip_pct:.3%} > {SLIP_MAX_PCT:.3%} "
-                f"(señal={btc_price:.2f} fill={fill_price:.2f}) — cerrando posición"
+                f"(señal={btc_price:.2f} fill={fill_price:.2f}) — cancelando entrada"
             )
-            # Cerrar inmediatamente para evitar pérdida por SL mal calculado
+            # No abrir posición con slippage excesivo — SL estaría mal calculado
             await self._execute_sell(
                 Position(
                     position_id=pos_id, symbol=SYMBOL, side=direction,
-                    entry_price=fill_price, size_usd=self.stake_usd,
+                    entry_price=fill_price, size_usd=stake_usd,
                     qty_base=qty_btc, stop_order_id=stop_order_id,
                     tp_price=fill_price, sl_price=fill_price, opened_at=time.time(),
                 ),
@@ -415,19 +507,16 @@ class SignalEngine:
             )
             return
 
-        if direction == "SHORT":
-            tp_price = fill_price * (1 - self.tp_pct)       # TP: precio baja
-            sl_price = fill_price * (1 + self.sl_drop_pct)  # SL: precio sube
-        else:
-            tp_price = fill_price * (1 + self.tp_pct)
-            sl_price = fill_price * (1 - self.sl_drop_pct)
+        # SL/TP calculados sobre el fill real (no el precio de señal)
+        sl_price = self.risk_engine.compute_sl_price(fill_price, self.sl_drop_pct, direction)
+        tp_price = self.risk_engine.compute_tp_price(fill_price, self.tp_pct, direction)
 
         pos = Position(
             position_id   = pos_id,
             symbol        = SYMBOL,
             side          = direction,
             entry_price   = fill_price,
-            size_usd      = self.stake_usd,
+            size_usd      = stake_usd,
             qty_base      = qty_btc,
             stop_order_id = stop_order_id,
             tp_price      = tp_price,
@@ -436,20 +525,16 @@ class SignalEngine:
         )
         self.open_pos.append(pos)
 
+        rr_ok, rr = self.risk_engine.check_rr(self.tp_pct, self.sl_drop_pct, self.min_rr)
         self._linfo(
-            f"[ENTRY] Posición abierta: {pos_id} "
-            f"entry={fill_price:.2f} qty={qty_btc:.6f}BTC "
-            f"TP={tp_price:.2f} SL={sl_price:.2f} "
-            f"stopOrderId={stop_order_id or 'manual'}"
+            f"[ENTRY] Posición abierta: {pos_id} side={direction} "
+            f"entry={fill_price:.2f} qty={qty_btc:.5f}BTC "
+            f"TP={tp_price:.2f}(+{self.tp_pct:.2%}) SL={sl_price:.2f}(-{self.sl_drop_pct:.2%}) "
+            f"R:R={rr:.2f} stopOrderId={stop_order_id or 'manual'}"
         )
 
         self._save_open_positions()
         self._log_trade_csv("OPEN", pos, fill_price, 0.0, "ENTRY")
-
-        if stop_order_id:
-            self._linfo(f"[ENTRY] Stop-loss nativo activo en Binance: orderId={stop_order_id}")
-        else:
-            self._lwarn("[ENTRY] Sin stop-loss nativo — monitoring manual activo")
 
         metrics.set_open_positions(len(self.open_pos))
 
@@ -499,40 +584,53 @@ class SignalEngine:
                 continue
 
             # ── Take Profit parcial ──────────────────────────────────────────
-            if not pos.partial_tp_done and pnl_pct >= self.tp_partial_pct:
+            tp_partial_price = self.risk_engine.compute_tp_partial_price(
+                pos.entry_price, self.tp_partial_pct, pos.side
+            )
+            tp_partial_hit = (
+                (btc_price >= tp_partial_price) if pos.side == "LONG"
+                else (btc_price <= tp_partial_price)
+            )
+
+            if not pos.partial_tp_done and tp_partial_hit:
                 qty_sell = round(pos.qty_base * 0.5, 6)
                 self._linfo(
                     f"[TP PARCIAL] pos={pos.position_id} ({pos.side}) precio={btc_price:.2f} "
                     f"pnl={pnl_pct:.3%} >= {self.tp_partial_pct:.3%} "
                     f"— vendiendo 50% ({qty_sell:.6f} BTC), manteniendo {qty_sell:.6f} BTC"
                 )
-                # Reducir qty ANTES de llamar execute_sell para que el log y
-                # el tracker reflejen la qty correcta al terminar
                 pos.qty_base        -= qty_sell
                 pos.partial_tp_done  = True
-                pos.status           = "open"  # mantener activa
+                pos.status           = "open"
                 await self._execute_sell(pos, btc_price, qty_sell, "TP_PARTIAL",
                                          partial_close=True)
-                # pos sigue en open_pos con qty_base reducida y sin stop nativo
-                # (cancelado por executor) — el SL local la protege hasta cierre
                 continue
 
             # ── Take Profit completo ─────────────────────────────────────────
-            if pnl_pct >= self.tp_pct:
+            tp_full_hit = (
+                (btc_price >= pos.tp_price) if pos.side == "LONG"
+                else (btc_price <= pos.tp_price)
+            )
+            if tp_full_hit:
                 self._linfo(
                     f"[TP FULL] pos={pos.position_id} ({pos.side}) precio={btc_price:.2f} "
-                    f"pnl={pnl_pct:.3%} >= {self.tp_pct:.3%}"
+                    f"tp_price={pos.tp_price:.2f} pnl={pnl_pct:.3%}"
                 )
                 await self._execute_sell(pos, btc_price, pos.qty_base, "TP_FULL")
                 continue
 
-            # ── Cierre por tiempo máximo ─────────────────────────────────────
+            # ── Cierre de emergencia por tiempo máximo ────────────────────────
+            # TIME_EXIT NO es una salida normal — es una válvula de seguridad para
+            # posiciones que por algún error no se cerraron por SL/TP.
+            # El MAX_HOLD_S debe ser ≥ 1 hora para no interferir con trades normales.
             if holding_s >= self.max_hold_s:
                 self._lwarn(
-                    f"[TIME EXIT] pos={pos.position_id} ({pos.side}) holding={holding_s:.0f}s >= {self.max_hold_s}s "
-                    f"precio={btc_price:.2f} pnl={pnl_pct:.3%} — cerrando a mercado"
+                    f"[TIME_EXIT_EMERGENCY] pos={pos.position_id} ({pos.side}) "
+                    f"holding={holding_s:.0f}s >= {self.max_hold_s}s "
+                    f"precio={btc_price:.2f} pnl={pnl_pct:.3%} — "
+                    f"SALIDA DE EMERGENCIA (SL/TP no funcionaron)"
                 )
-                await self._execute_sell(pos, btc_price, pos.qty_base, "TIME_EXIT")
+                await self._execute_sell(pos, btc_price, pos.qty_base, "TIME_EXIT_EMERGENCY")
                 continue
 
             # ── Log periódico ────────────────────────────────────────────────
@@ -614,6 +712,21 @@ class SignalEngine:
         self.session_pnl += pnl_usd
         self._hourly_trades.append((time.time(), pnl_usd))
         loss_tracker.record_pnl(pnl_usd)
+
+        # ── Actualizar motor de riesgo ─────────────────────────────────────────
+        if not partial_close:
+            if pnl_usd >= 0:
+                self.safety.record_win()
+            else:
+                self.safety.record_loss()
+                if self.safety.is_safety_paused:
+                    self.entries_paused = True
+                    self._linfo(
+                        f"[SAFETY] PAUSA por {self.safety.consecutive_losses} pérdidas consecutivas. "
+                        f"Envía /resume para reanudar."
+                    )
+        # Actualizar wallet estimado para el próximo sizing
+        self._cached_wallet_usd = max(1.0, self._cached_wallet_usd + pnl_usd)
 
         if pos.side == "SHORT":
             pnl_pct = (pos.entry_price - exit_price) / pos.entry_price
@@ -837,6 +950,9 @@ class SignalEngine:
                             "stop_order_id":  p.stop_order_id[:12] if p.stop_order_id else "",
                         })
 
+                    safety_stats = self.safety.stats()
+                    rr_ok, rr = self.risk_engine.check_rr(self.tp_pct, self.sl_drop_pct, self.min_rr)
+
                     hb = {
                         "bot":            "strategy_binance",
                         "status":         "online",
@@ -845,10 +961,21 @@ class SignalEngine:
                         "open_positions": len(self.open_pos),
                         "positions_data": positions_data,
                         "session_pnl":    round(self.session_pnl, 2),
+                        "wallet_usd":     round(self._cached_wallet_usd, 2),
                         "btc_price":      round(btc, 2) if btc else None,
                         "btc_momentum":   round(mom_pct, 4),
                         "btc_direction":  mom_dir,
-                        "entries_paused": self.entries_paused,
+                        "entries_paused": self.entries_paused or self.safety.is_safety_paused,
+                        "risk": {
+                            "risk_pct":           self.risk_pct,
+                            "rr_ratio":           rr,
+                            "rr_ok":              rr_ok,
+                            "consecutive_losses": safety_stats["consecutive_losses"],
+                            "trades_last_hour":   safety_stats["trades_last_hour"],
+                            "max_per_hour":       safety_stats["max_per_hour"],
+                            "cooldown_remaining": safety_stats["cooldown_remaining_s"],
+                            "safety_paused":      safety_stats["safety_paused"],
+                        },
                         "params": {
                             "STAKE_USD":        self.stake_usd,
                             "TP_PCT":           self.tp_pct,
@@ -991,9 +1118,12 @@ class SignalEngine:
                     elif msg_text == "/resume":
                         self._drawdown_paused = False
                         self.entries_paused   = False
-                        self._linfo("[TELEGRAM] /resume recibido — entradas reanudadas")
+                        self.safety.resume()
+                        self._linfo("[TELEGRAM] /resume recibido — entradas reanudadas, safety reseteado")
                         await send_telegram_async(
-                            "✅ Bot reanudado por /resume\nLas entradas vuelven a estar activas.",
+                            "✅ Bot reanudado por /resume\n"
+                            "Las entradas vuelven a estar activas.\n"
+                            "Racha de pérdidas consecutivas reseteada.",
                             level="INFO",
                             prefix_label="CalvinBTC · Telegram",
                         )
@@ -1110,6 +1240,37 @@ class SignalEngine:
             except Exception as exc:
                 self._lwarn(f"[REPORT] Error en reporte diario: {exc}")
 
+    # ── Actualización del balance del wallet ──────────────────────────────────
+
+    async def _wallet_balance_loop(self) -> None:
+        """
+        Actualiza self._cached_wallet_usd cada 60s desde Redis o Binance.
+
+        El execution_bot publica el wallet real a 'state:wallet:balance' tras
+        cada fill. Este loop lo consume para que el risk engine tenga datos frescos.
+        En DRY_RUN usa el fallback configurado.
+        """
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if self.redis is None:
+                    continue
+
+                # Intentar leer desde Redis (publicado por execution_bot)
+                raw = await self.redis.get("state:wallet:balance")
+                if raw:
+                    data = json.loads(raw)
+                    balance = float(data.get("balance_usd", 0))
+                    if balance > 0:
+                        old = self._cached_wallet_usd
+                        self._cached_wallet_usd = balance
+                        if abs(old - balance) > 1.0:
+                            self._linfo(
+                                f"[WALLET] Balance actualizado: ${old:.2f} → ${balance:.2f} USDT"
+                            )
+            except Exception as exc:
+                self._lwarn(f"[WALLET] Error actualizando balance: {exc}")
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def _main_loop(self) -> None:
@@ -1183,6 +1344,7 @@ class SignalEngine:
             self._telegram_command_listener(),
             self._night_mode_monitor(),
             self._daily_report(),
+            self._wallet_balance_loop(),
         )
 
 

@@ -119,3 +119,40 @@ def has_enough_history(min_window_s: float = 30.0) -> bool:
         return False
     oldest = _price_history[0][0]
     return (time.time() - oldest) >= min_window_s
+
+
+def get_atr_pct(chunks: int = 6, chunk_s: float = 30.0) -> Optional[float]:
+    """
+    Calcula un ATR aproximado como porcentaje del precio actual.
+
+    Divide los últimos (chunks × chunk_s) segundos en sub-ventanas y calcula
+    el rango (max - min) de cada una. El ATR% = media de esos rangos / precio.
+
+    Retorna None si no hay suficiente historia.
+
+    Ejemplo con chunks=6, chunk_s=30:
+      → analiza los últimos 3 minutos en ventanas de 30s cada una
+      → ATR% ≈ 0.002 significa que BTC oscila ~0.2% en 30s típicamente
+    """
+    if _last_price is None or len(_price_history) < 10:
+        return None
+
+    now = time.time()
+    total_window = chunks * chunk_s
+    prices_in_window = [(ts, p) for ts, p in _price_history if ts >= now - total_window]
+
+    if len(prices_in_window) < chunks:
+        return None
+
+    ranges: list = []
+    for i in range(chunks):
+        t_start = now - total_window + i * chunk_s
+        t_end   = t_start + chunk_s
+        chunk_prices = [p for ts, p in prices_in_window if t_start <= ts < t_end]
+        if len(chunk_prices) >= 2:
+            ranges.append((max(chunk_prices) - min(chunk_prices)) / _last_price)
+
+    if not ranges:
+        return None
+
+    return sum(ranges) / len(ranges)

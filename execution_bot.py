@@ -1226,6 +1226,31 @@ class ExecutionBot:
                 error=exc_str[:200],
             )
 
+    async def _publish_wallet_balance(self) -> None:
+        """
+        Publica el balance real del wallet a Redis ('state:wallet:balance').
+
+        El Signal Engine lo consume para calcular el tamaño de posición basado
+        en riesgo (% de wallet). Se llama en fire-and-forget tras cada fill.
+        """
+        if DRY_RUN or self._redis_pub is None:
+            return
+        try:
+            if hasattr(self.exchange, "fetch_wallet_balance"):
+                balance = await self.exchange.fetch_wallet_balance()
+            else:
+                balance = await self.exchange.fetch_balance()
+
+            if balance > 0:
+                payload = json.dumps({
+                    "balance_usd": round(balance, 4),
+                    "timestamp":   datetime.utcnow().isoformat(),
+                })
+                await self._redis_pub.setex("state:wallet:balance", 300, payload)
+                log.debug(f"[WALLET] Balance publicado: ${balance:.2f} USDT")
+        except Exception as exc:
+            log.warning(f"[WALLET] Error publicando balance: {exc}")
+
     async def _dispatch_signal(self, raw_msg: str) -> None:
         """Procesa un mensaje JSON del canal signals:trade."""
         try:
@@ -1316,6 +1341,11 @@ class ExecutionBot:
         # Publicar recibo de vuelta a calvin5 y a logs
         await self._publish_receipt(receipt)
         self.rate_limiter.reset()
+
+        # Publicar balance real del wallet tras cada fill para que el risk engine
+        # del Signal Engine tenga datos frescos para el siguiente sizing
+        if receipt.status == "FILLED":
+            asyncio.create_task(self._publish_wallet_balance())
 
         log.info(
             f"[DISPATCH] Completado: {signal.action} → status={receipt.status} "

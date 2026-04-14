@@ -175,7 +175,7 @@ class BinanceFuturesExchange:
     # ── Balance ────────────────────────────────────────────────────────────────
 
     async def fetch_balance(self) -> float:
-        """Retorna el saldo USDT disponible como margen."""
+        """Retorna el saldo USDT disponible como margen (free margin)."""
         if DRY_RUN or self._client is None:
             return 9999.0
 
@@ -186,10 +186,40 @@ class BinanceFuturesExchange:
             )
             usdt = balance.get("USDT", {})
             free = float(usdt.get("free", 0) or 0)
-            log.debug(f"[FUTURES] Balance USDT: ${free:.2f}")
+            log.debug(f"[FUTURES] Balance USDT free: ${free:.2f}")
             return free
         except Exception as exc:
             log.warning(f"[FUTURES] Error consultando balance: {exc}")
+            return 0.0
+
+    async def fetch_wallet_balance(self) -> float:
+        """
+        Retorna el balance total del wallet USDT (equity = free + used margin + unrealized PnL).
+
+        Es la fuente de verdad para el risk engine — representa el capital real
+        incluyendo posiciones abiertas.
+        """
+        if DRY_RUN or self._client is None:
+            return 9999.0
+
+        loop = asyncio.get_running_loop()
+        try:
+            balance = await loop.run_in_executor(
+                None, lambda: self._client.fetch_balance()
+            )
+            # En ccxt binanceusdm, 'total' incluye free + used
+            usdt = balance.get("USDT", {})
+            total = float(usdt.get("total", 0) or 0)
+            if total <= 0:
+                # Fallback: intentar leer 'info' de la respuesta raw de Binance
+                for asset in balance.get("info", {}).get("assets", []):
+                    if asset.get("asset") == "USDT":
+                        total = float(asset.get("walletBalance", 0) or 0)
+                        break
+            log.debug(f"[FUTURES] Wallet balance USDT total: ${total:.2f}")
+            return total
+        except Exception as exc:
+            log.warning(f"[FUTURES] Error consultando wallet balance: {exc}")
             return 0.0
 
     # ── Compra (abrir LONG) ────────────────────────────────────────────────────
