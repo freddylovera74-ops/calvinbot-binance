@@ -1442,7 +1442,7 @@ class ExecutionBot:
                 continue
             if _in_trading_hours():
                 silence_s = time.time() - self._last_signal_ts
-                if silence_s > 120:
+                if silence_s > 600:
                     log.critical(
                         f"[STUCK] ExecutionBot sin señales en {silence_s:.0f}s durante horario de trading "
                         f"— posible stuck en pub/sub. Considera reiniciar el proceso."

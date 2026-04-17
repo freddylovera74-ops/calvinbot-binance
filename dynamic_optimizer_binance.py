@@ -79,15 +79,15 @@ BOUNDS = {
 # Parámetros iniciales — reflejan la config correcta del .env post-refactor
 INITIAL_PARAMS = {
     "STAKE_USD":        50.0,
-    "BTC_MIN_PCT":      0.10,
+    "BTC_MIN_PCT":      0.06,
     "BTC_WINDOW_S":     30,
     "TP_PCT":           0.012,
     "TP_PARTIAL_PCT":   0.006,
     "SL_DROP_PCT":      0.008,
     "MAX_OPEN_POS":     1,
-    "THROTTLE_S":       120,
+    "THROTTLE_S":       30,
     "MAX_HOLD_S":       3600,
-    "DAILY_LOSS_LIMIT": 50.0,
+    "DAILY_LOSS_LIMIT": 200.0,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
