@@ -133,6 +133,7 @@ class Position:
     opened_at:       float
     status:          str  = "open"
     partial_tp_done: bool = False
+    breakeven_done:  bool = False   # SL ya movido a break-even
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -568,9 +569,39 @@ class SignalEngine:
                 pnl_pct = (btc_price - pos.entry_price) / pos.entry_price
                 sl_hit  = btc_price < pos.sl_price   # precio baja = pérdida en LONG
 
+            # ── Break-even: cuando llegamos al 50% del camino al TP ──────────
+            # Mueve el SL al precio de entrada para nunca cerrar en pérdida
+            # una posición que alguna vez estuvo a mitad de TP.
+            if not pos.breakeven_done and holding_s > ENTRY_GRACE_S:
+                half_tp_hit = (
+                    btc_price >= pos.entry_price + (pos.tp_price - pos.entry_price) * 0.5
+                    if pos.side == "LONG"
+                    else btc_price <= pos.entry_price - (pos.entry_price - pos.tp_price) * 0.5
+                )
+                if half_tp_hit:
+                    pos.sl_price       = pos.entry_price
+                    pos.breakeven_done = True
+                    self._linfo(
+                        f"[BREAKEVEN] pos={pos.position_id} SL movido a entrada "
+                        f"{pos.entry_price:.2f} (precio={btc_price:.2f})"
+                    )
+
+            # ── Trailing stop tras TP parcial ────────────────────────────────
+            # Una vez ejecutado el parcial, el SL sube a entry + 30% del TP_PARTIAL
+            # para asegurar que la segunda mitad cierra en verde siempre.
+            if pos.partial_tp_done:
+                trail_sl = (
+                    pos.entry_price * (1 + self.tp_partial_pct * 0.3)
+                    if pos.side == "LONG"
+                    else pos.entry_price * (1 - self.tp_partial_pct * 0.3)
+                )
+                if pos.side == "LONG":
+                    pos.sl_price = max(pos.sl_price, trail_sl)
+                else:
+                    pos.sl_price = min(pos.sl_price, trail_sl)
+
             # ── Verificar si SL fue disparado por Binance ────────────────────
             # Grace period: no revisar SL los primeros ENTRY_GRACE_S segundos.
-            # Evita cierres instantáneos por slippage en el momento de entrada.
             if sl_hit and holding_s < ENTRY_GRACE_S:
                 continue
 
@@ -619,18 +650,25 @@ class SignalEngine:
                 await self._execute_sell(pos, btc_price, pos.qty_base, "TP_FULL")
                 continue
 
-            # ── Cierre de emergencia por tiempo máximo ────────────────────────
-            # TIME_EXIT NO es una salida normal — es una válvula de seguridad para
-            # posiciones que por algún error no se cerraron por SL/TP.
-            # El MAX_HOLD_S debe ser ≥ 1 hora para no interferir con trades normales.
+            # ── TIME_EXIT inteligente ─────────────────────────────────────────
+            # Si la posición lleva MAX_HOLD_S sin tocar TP/SL, la cerramos.
+            # Si está en verde → TIME_EXIT_PROFIT (se contabiliza como ganancia).
+            # Si está en rojo  → TIME_EXIT_EMERGENCY (no esperamos más).
             if holding_s >= self.max_hold_s:
-                self._lwarn(
-                    f"[TIME_EXIT_EMERGENCY] pos={pos.position_id} ({pos.side}) "
-                    f"holding={holding_s:.0f}s >= {self.max_hold_s}s "
-                    f"precio={btc_price:.2f} pnl={pnl_pct:.3%} — "
-                    f"SALIDA DE EMERGENCIA (SL/TP no funcionaron)"
-                )
-                await self._execute_sell(pos, btc_price, pos.qty_base, "TIME_EXIT_EMERGENCY")
+                if pnl_pct > 0:
+                    self._linfo(
+                        f"[TIME_EXIT_PROFIT] pos={pos.position_id} ({pos.side}) "
+                        f"holding={holding_s:.0f}s pnl={pnl_pct:+.3%} "
+                        f"precio={btc_price:.2f} — cerrando en GANANCIA"
+                    )
+                    await self._execute_sell(pos, btc_price, pos.qty_base, "TIME_EXIT_PROFIT")
+                else:
+                    self._lwarn(
+                        f"[TIME_EXIT_EMERGENCY] pos={pos.position_id} ({pos.side}) "
+                        f"holding={holding_s:.0f}s pnl={pnl_pct:+.3%} "
+                        f"precio={btc_price:.2f} — SALIDA EMERGENCIA"
+                    )
+                    await self._execute_sell(pos, btc_price, pos.qty_base, "TIME_EXIT_EMERGENCY")
                 continue
 
             # ── Log periódico ────────────────────────────────────────────────
@@ -1127,6 +1165,22 @@ class SignalEngine:
                             level="INFO",
                             prefix_label="CalvinBTC · Telegram",
                         )
+                    elif msg_text == "/close_all":
+                        btc = bp.get_btc_price() or 0.0
+                        if not self.open_pos:
+                            await send_telegram_async(
+                                "ℹ️ No hay posiciones abiertas.",
+                                level="INFO", prefix_label="CalvinBTC · Telegram",
+                            )
+                        else:
+                            for pos in list(self.open_pos):
+                                if pos.status != "closing":
+                                    self._linfo(f"[TELEGRAM] /close_all → cerrando {pos.position_id}")
+                                    await self._execute_sell(pos, btc, pos.qty_base, "MANUAL_CLOSE")
+                            await send_telegram_async(
+                                f"✅ /close_all ejecutado — {len(self.open_pos)} posiciones cerradas.",
+                                level="INFO", prefix_label="CalvinBTC · Telegram",
+                            )
                     elif msg_text == "/status":
                         mom_pct, mom_dir = bp.get_momentum(window_s=self.btc_window_s)
                         btc = bp.get_btc_price()
