@@ -45,6 +45,8 @@ MAX_RESTARTS_PER_H = int(os.getenv("WD_MAX_RESTARTS_H",    "3"))
 DRAWDOWN_WARN      = float(os.getenv("WD_DRAWDOWN_WARN",   "40.0"))
 DRAWDOWN_KILL      = float(os.getenv("WD_DRAWDOWN_KILL",   "80.0"))
 
+_drawdown_kill_active = False   # flag: evita bucle infinito de KILL cada 20s
+
 from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 _wd_log_handler = _RotatingFileHandler(
     BASE_DIR / "watchdog_binance.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
@@ -247,15 +249,25 @@ async def check_cycle(r: aioredis.Redis, strategy_st: BotState, executor_st: Bot
             log.warning(f"Loss limit WARNING — {lt_msg}")
 
         if drawdown >= DRAWDOWN_KILL:
-            log.error(f"DRAWDOWN KILL — sesion PnL: ${session_pnl:.2f}")
-            _pause_executor(None)
-            await send_telegram_async(
-                f"DRAWDOWN KILL activado\nPerdida sesion: ${session_pnl:.2f}\n"
-                f"Limite: ${DRAWDOWN_KILL}",
-                level="CRITICAL", prefix_label="CalvinBTC · Watchdog"
-            )
-        elif drawdown >= DRAWDOWN_WARN:
-            log.warning(f"Drawdown WARNING — ${session_pnl:.2f}")
+            global _drawdown_kill_active
+            if not _drawdown_kill_active:
+                _drawdown_kill_active = True
+                log.error(f"DRAWDOWN KILL — sesion PnL: ${session_pnl:.2f}")
+                _pause_executor(None)
+                await send_telegram_async(
+                    f"DRAWDOWN KILL activado\nPerdida sesion: ${session_pnl:.2f}\n"
+                    f"Limite: ${DRAWDOWN_KILL}\nEnvia /resume al bot para reanudar.",
+                    level="CRITICAL", prefix_label="CalvinBTC · Watchdog"
+                )
+            else:
+                log.warning(f"[WD] Drawdown kill activo — en espera de /resume (pnl={session_pnl:.2f})")
+        else:
+            # Si el PnL se recuperó (nuevo día / /resume), resetear el flag
+            if _drawdown_kill_active:
+                _drawdown_kill_active = False
+                log.info("[WD] Drawdown kill desactivado — PnL recuperado")
+            if drawdown >= DRAWDOWN_WARN:
+                log.warning(f"Drawdown WARNING — ${session_pnl:.2f}")
 
     except Exception as ex:
         log.error(f"Error verificando loss limits: {ex}")
