@@ -361,18 +361,29 @@ class SignalEngine:
         if direction is None or abs(mom_pct) < self.btc_min_pct:
             return False, "", f"momentum insuficiente ({mom_pct:+.3f}% < {self.btc_min_pct:.3f}%)"
 
+        # ── Filtro de tendencia media (5 min) ─────────────────────────────────
+        # Solo entrar en la dirección que confirma la tendencia de 5 minutos.
+        # Evita LONG en rebotes dentro de un downtrend y SHORT en correcciones alcistas.
+        trend5m_pct, trend5m_dir = bp.get_momentum(window_s=300)
+
         if direction == "UP":
-            return True, "LONG", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
+            if trend5m_dir == "DOWN" and abs(trend5m_pct) > self.btc_min_pct * 2:
+                return False, "", (
+                    f"LONG bloqueado: tendencia 5min bajista "
+                    f"({trend5m_pct:+.3f}% < 0, mom30s={mom_pct:+.3f}%)"
+                )
+            return True, "LONG", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s | tendencia5m={trend5m_pct:+.3f}%"
         elif direction == "DOWN":
             # SHORT requiere momentum más fuerte (3x) para evitar falsas señales
             short_min_pct = self.btc_min_pct * 3
             if abs(mom_pct) < short_min_pct:
                 return False, "", f"SHORT: momentum insuficiente ({mom_pct:+.3f}% < -{short_min_pct:.3f}%)"
-            # Bloquear SHORT si tendencia general es alcista (ventana larga)
-            trend_pct, trend_dir = bp.get_momentum(window_s=120)
-            if trend_pct > SHORT_BLOCK_MOM:
-                return False, "", f"SHORT bloqueado: tendencia alcista en 2min (+{trend_pct:.3f}% > +{SHORT_BLOCK_MOM:.3f}%)"
-            return True, "SHORT", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s"
+            if trend5m_dir == "UP" and abs(trend5m_pct) > self.btc_min_pct * 2:
+                return False, "", (
+                    f"SHORT bloqueado: tendencia 5min alcista "
+                    f"({trend5m_pct:+.3f}% > 0, mom30s={mom_pct:+.3f}%)"
+                )
+            return True, "SHORT", f"momentum {mom_pct:+.3f}% en {self.btc_window_s}s | tendencia5m={trend5m_pct:+.3f}%"
 
         return False, "", "sin dirección clara"
 
@@ -599,6 +610,24 @@ class SignalEngine:
                     pos.sl_price = max(pos.sl_price, trail_sl)
                 else:
                     pos.sl_price = min(pos.sl_price, trail_sl)
+
+            # ── Salida anticipada por tiempo + pérdida ───────────────────────
+            # Si la posición lleva >20min y pierde más del 0.3%, cortamos sin
+            # esperar al SL (que es 0.8% y puede tardar más en activarse).
+            # Excepto si ya ejecutamos TP parcial — en ese caso el trailing SL protege.
+            EARLY_EXIT_HOLD_S  = 1200   # 20 minutos
+            EARLY_EXIT_LOSS_PCT = -0.003  # -0.3%
+            if (not pos.partial_tp_done
+                    and not pos.breakeven_done
+                    and holding_s > EARLY_EXIT_HOLD_S
+                    and pnl_pct < EARLY_EXIT_LOSS_PCT):
+                self._lwarn(
+                    f"[EARLY_EXIT] pos={pos.position_id} ({pos.side}) "
+                    f"holding={holding_s:.0f}s pnl={pnl_pct:+.3%} < {EARLY_EXIT_LOSS_PCT:.3%} "
+                    f"— cortando pérdida anticipada"
+                )
+                await self._execute_sell(pos, btc_price, pos.qty_base, "EARLY_EXIT")
+                continue
 
             # ── Verificar si SL fue disparado por Binance ────────────────────
             # Grace period: no revisar SL los primeros ENTRY_GRACE_S segundos.

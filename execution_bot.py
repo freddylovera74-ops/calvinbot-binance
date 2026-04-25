@@ -1443,11 +1443,22 @@ class ExecutionBot:
             if _in_trading_hours():
                 silence_s = time.time() - self._last_signal_ts
                 if silence_s > 600:
+                    # Si la estrategia tiene posición abierta, el silencio es normal
+                    # (no genera nuevas señales mientras MAX_OPEN_POS está lleno).
+                    try:
+                        raw = await self.redis.get("state:strategy:latest")
+                        open_pos = json.loads(raw).get("open_positions", 0) if raw else 0
+                    except Exception:
+                        open_pos = 0
+                    if open_pos > 0:
+                        log.debug(
+                            f"[STUCK] Sin señales {silence_s:.0f}s pero hay {open_pos} posición(es) abierta(s) — normal"
+                        )
+                        continue
                     log.critical(
                         f"[STUCK] ExecutionBot sin señales en {silence_s:.0f}s durante horario de trading "
                         f"— posible stuck en pub/sub. Considera reiniciar el proceso."
                     )
-                    # Alertar al watchdog para que tome acción
                     await self._alert_watchdog(
                         "executor_stuck",
                         f"no signals in {silence_s:.0f}s during trading hours",
