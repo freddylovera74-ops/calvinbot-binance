@@ -67,12 +67,12 @@ BOUNDS = {
     "BTC_MIN_PCT":      (0.05,   0.30),    # señal mínima momentum: 0.05%–0.30%
     "BTC_WINDOW_S":     (15,     60),      # ventana en segundos
     # TP/SL deben mantener R:R >= 1.5 (TP >= SL × 1.5)
-    "TP_PCT":           (0.008,  0.025),   # 0.8%–2.5% take profit en precio
-    "SL_DROP_PCT":      (0.004,  0.015),   # 0.4%–1.5% stop loss en precio
+    "TP_PCT":           (0.004,  0.012),   # 0.4%–1.2% take profit en precio
+    "SL_DROP_PCT":      (0.002,  0.008),   # 0.2%–0.8% stop loss en precio
     "MAX_OPEN_POS":     (1,      1),       # siempre 1 (sin acumulación)
     "THROTTLE_S":       (60,     300),     # mínimo 1 min, máx 5 min entre entradas
-    "MAX_HOLD_S":       (1800,   7200),    # 30min–2h emergencia
-    "TP_PARTIAL_PCT":   (0.004,  0.015),   # TP parcial = ~50% del TP full
+    "MAX_HOLD_S":       (900,    3600),    # 15min–1h emergencia
+    "TP_PARTIAL_PCT":   (0.002,  0.008),   # TP parcial = ~50% del TP full
     "DAILY_LOSS_LIMIT": (30.0,   100.0),
 }
 
@@ -81,12 +81,12 @@ INITIAL_PARAMS = {
     "STAKE_USD":        50.0,
     "BTC_MIN_PCT":      0.06,
     "BTC_WINDOW_S":     30,
-    "TP_PCT":           0.012,
-    "TP_PARTIAL_PCT":   0.006,
-    "SL_DROP_PCT":      0.008,
+    "TP_PCT":           0.006,
+    "TP_PARTIAL_PCT":   0.003,
+    "SL_DROP_PCT":      0.004,
     "MAX_OPEN_POS":     1,
     "THROTTLE_S":       30,
-    "MAX_HOLD_S":       3600,
+    "MAX_HOLD_S":       1800,
     "DAILY_LOSS_LIMIT": 200.0,
 }
 
